@@ -111,15 +111,17 @@ def parse_timestamp(col: pd.Series, tz_ny) -> pd.Series:
 
         # Process naive timestamps: localize to tz_ny
         if naive_elements_mask.any():
-            naive_series = pd.to_datetime(active_dts[naive_elements_mask]) # Ensure datetime Series for .dt accessor
-            localized_naive = naive_series.dt.tz_localize(tz_ny, ambiguous='NaT', nonexistent='shift_forward')
-            final_dt.loc[naive_series.index] = localized_naive
+            series_to_localize = active_dts[naive_elements_mask]
+            # series_to_localize contains naive pd.Timestamp objects (or similar datetime-like objects)
+            localized_naive = series_to_localize.dt.tz_localize(tz_ny, ambiguous='NaT', nonexistent='shift_forward')
+            final_dt.loc[series_to_localize.index] = localized_naive
             
         # Process aware timestamps: convert to tz_ny
         if aware_elements_mask.any():
-            aware_series = pd.to_datetime(active_dts[aware_elements_mask]) # Ensure datetime Series for .dt accessor
-            converted_aware = aware_series.dt.tz_convert(tz_ny)
-            final_dt.loc[aware_series.index] = converted_aware
+            series_to_convert = active_dts[aware_elements_mask]
+            # series_to_convert contains aware pd.Timestamp objects (or similar datetime-like objects)
+            converted_aware = series_to_convert.dt.tz_convert(tz_ny)
+            final_dt.loc[series_to_convert.index] = converted_aware
             
     return final_dt
 

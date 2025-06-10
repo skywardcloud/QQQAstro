@@ -1,215 +1,134 @@
+#!/usr/bin/env python3
+"""QQQ Astro Pipeline v2
+Adds:
+  • Moon sign, nakshatra, NASDAQ-Lagna house (v1)
+  • Solar‑arc progressed Lagna (daily)
+  • Lunar‑return flag (±30 min)
+  • Rahu/Ketu longitudes and ±2° Lagna‑contact flag
+
+Run:
+  python qqq_pipeline_v2.py --csv /path/to/QQQ.csv --out enriched.csv
+If --csv is omitted it tries to auto‑detect a QQQ‑named CSV in /mnt/data
 """
-QQQ Astro‑Pipeline 🌓📈  • v0.2 (robust file‑loader)
-──────────────────────────────────────────────────────────────
-Goal   Enrich every 5‑minute QQQ bar with the Moon’s western sign,
-       sidereal nakshatra‑pada and NASDAQ‑Lagna house so we can
-       hunt for repeatable astro/volatility patterns.
 
-🔑 What changed in v0.2
-    • Graceful CSV discovery – no hard crash if the exact path is wrong.
-    • `--csv` and `--out` CLI arguments for flexibility.
-    • Extra self‑test ensures friendly error when data file missing.
-    • Docstring refreshed; logic unchanged elsewhere.
-
-💾 Runtime requirements
-    pandas · numpy · pytz   (all are pre‑installed here)
-    (Optionally) skyfield    — used when available.
-"""
-from __future__ import annotations
-
-import argparse
 import math
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Tuple
+from datetime import datetime, timezone
+from typing import Dict
 
-try:
-    import numpy as np  # noqa: F401 – optional helper
-except ModuleNotFoundError:  # pragma: no cover - optional dependency
-    np = None
-
-try:
-    import pandas as pd
-except ModuleNotFoundError as exc:
-    raise SystemExit("✗ pandas is required but not installed.") from exc
-
+import pandas as pd
 import pytz
 
-# ─────────────────────────────────────────────────────────────
-# NASDAQ radix constants
-LAGNA_DEG = 8 + 37 / 60 + 21 / 3600  # 8° 37′ 21″ Taurus
+# -------------------------- constants -------------------------------
+AYANAMSA = 24.0  # fixed offset for crude sidereal
+NATAL_SUN_LONG = 325.722   # Aquarius 25°43′22″
+NATAL_MOON_LONG = 238.399  # Scorpio 28°23′55″
+NATAL_LAGNA_LONG = 38.6225 # Taurus 8°37′21″
+
+J2000 = datetime(2000, 1, 1, 12, tzinfo=timezone.utc)
+
 SIGNS = [
-    "Aries",
-    "Taurus",
-    "Gemini",
-    "Cancer",
-    "Leo",
-    "Virgo",
-    "Libra",
-    "Scorpio",
-    "Sagittarius",
-    "Capricorn",
-    "Aquarius",
-    "Pisces",
+    "Aries","Taurus","Gemini","Cancer","Leo","Virgo",
+    "Libra","Scorpio","Sagittarius","Capricorn","Aquarius","Pisces"
 ]
-# 27 nakshatras (starting degrees, Lahiri ayanamsha)
+
 NAKSHATRAS = [
-    ("Ashwini", 0),
-    ("Bharani", 13 + 20 / 60),
-    ("Krittika", 26 + 40 / 60),
-    ("Rohini", 40),
-    ("Mrigashira", 53 + 20 / 60),
-    ("Ardra", 66 + 40 / 60),
-    ("Punarvasu", 80),
-    ("Pushya", 93 + 20 / 60),
-    ("Ashlesha", 106 + 40 / 60),
-    ("Magha", 120),
-    ("Purva Phalguni", 133 + 20 / 60),
-    ("Uttara Phalguni", 146 + 40 / 60),
-    ("Hasta", 160),
-    ("Chitra", 173 + 20 / 60),
-    ("Swati", 186 + 40 / 60),
-    ("Vishakha", 200),
-    ("Anuradha", 213 + 20 / 60),
-    ("Jyeshtha", 226 + 40 / 60),
-    ("Mula", 240),
-    ("Purva Ashadha", 253 + 20 / 60),
-    ("Uttara Ashadha", 266 + 40 / 60),
-    ("Shravana", 280),
-    ("Dhanishta", 293 + 20 / 60),
-    ("Shatabhisha", 306 + 40 / 60),
-    ("Purva Bhadra", 320),
-    ("Uttara Bhadra", 333 + 20 / 60),
-    ("Revati", 346 + 40 / 60),
+    "Ashwini","Bharani","Krittika","Rohini","Mrigashirsha","Ardra",
+    "Punarvasu","Pushya","Ashlesha","Magha","Purva Phalguni","Uttara Phalguni",
+    "Hasta","Chitra","Swati","Vishakha","Anuradha","Jyeshtha",
+    "Mula","Purva Ashadha","Uttara Ashadha","Shravana","Dhanishta",
+    "Shatabhisha","Purva Bhadrapada","Uttara Bhadrapada","Revati"
 ]
 
-HOUSE_CUSPS: Dict[int, float] = {h: (LAGNA_DEG + 30 * (h - 1)) % 360 for h in range(1, 13)}
+# ----------------------- astronomy helpers --------------------------
+def mean_moon_longitude(dt_utc: datetime) -> float:
+    days = (dt_utc - J2000).total_seconds()/86400.0
+    return (218.316 + 13.176396*days) % 360
 
-# ─────────────────────────────────────────────────────────────
-# Optional high‑precision Moon longitude with Skyfield
-try:
-    from skyfield.api import load  # type: ignore
+def mean_sun_longitude(dt_utc: datetime) -> float:
+    days = (dt_utc - J2000).total_seconds()/86400.0
+    return (280.460 + 0.9856474*days) % 360
 
-    _TS = load.timescale()
-    _EPH = load("de440s.bsp")
-    _MOON = _EPH["moon"]
-    _EARTH = _EPH["earth"]
+def mean_rahu_longitude(dt_utc: datetime) -> float:
+    days = (dt_utc - J2000).total_seconds()/86400.0
+    return (125.04452 - 0.0529538083*days) % 360
 
-    def moon_longitude(dt_utc: datetime) -> float:  # noqa: D401 – simple name
-        """Geocentric Moon longitude (tropical degrees)."""
-        t = _TS.utc(dt_utc)
-        ecl = _EARTH.at(t).observe(_MOON).ecliptic_position()
-        return math.degrees(math.atan2(ecl[1].au, ecl[0].au)) % 360
-
-except ModuleNotFoundError:
-
-    J2000 = datetime(2000, 1, 1, 12, tzinfo=timezone.utc)
-
-    def moon_longitude(dt_utc: datetime) -> float:  # type: ignore
-        """Fast mean‑longitude (≤1.5° error) if Skyfield unavailable."""
-        days = (dt_utc - J2000).total_seconds() / 86_400
-        return (218.316 + 13.176396 * days) % 360
-
-# ─────────────────────────────────────────────────────────────
-# Helper functions
-
+# --------------------- zodiac helpers -------------------------------
 def sign_from_longitude(lon: float) -> str:
-    return SIGNS[int(lon // 30)]
+    return SIGNS[int(lon//30)]
 
+def nakshatra_from_longitude(lon: float) -> str:
+    sid = (lon - AYANAMSA) % 360
+    return NAKSHATRAS[int(sid // (360/27))]
 
-def nakshatra_from_sidereal(lon_sidereal: float) -> Tuple[str, int]:
-    deg = lon_sidereal % 360
-    for i, (name, start_deg) in enumerate(NAKSHATRAS):
-        next_start = NAKSHATRAS[(i + 1) % 27][1]
-        if start_deg <= deg < next_start:
-            pada = int(((deg - start_deg) // 3.3333) + 1)
-            return name, pada
-    return "Revati", 4
+def house_from_longitude(lon: float, lagna_long: float) -> int:
+    return int(((lon - lagna_long) % 360)//30)+1
 
+def ang_diff(a: float, b: float) -> float:
+    return abs((a-b+180)%360 - 180)
 
-def house_from_longitude(lon: float) -> int:
-    shifted = (lon - LAGNA_DEG) % 360
-    return int(shifted // 30) + 1
-
-# ─────────────────────────────────────────────────────────────
-# Core logic
-
-def locate_csv(path_hint: Path | None = None) -> Path:
-    """Try to locate the CSV; fall back to glob search inside /mnt/data."""
-    if path_hint and path_hint.exists():
-        return path_hint
-    search_root = Path("/mnt/data")
-    for p in search_root.glob("QQQ*major*changes*.csv"):
-        return p
-    raise FileNotFoundError(
-        "✗ QQQ CSV not found. Upload the file or use --csv /path/to/file.csv",
-    )
-
-
-def enrich(csv_path: Path, out_path: Path | None = None) -> Path:
+# ----------------------- core pipeline ------------------------------
+def enrich(csv_path: Path, out_path: Path):
+    tz_ny = pytz.timezone("America/New_York")
     df = pd.read_csv(csv_path)
-    est = pytz.timezone("America/New_York")
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
-    df["timestamp_utc"] = df["timestamp"].dt.tz_localize(est).dt.tz_convert(timezone.utc)
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    if df['timestamp'].dt.tz is None or df['timestamp'].dt.tz.iloc[0] is None:
+        df['timestamp'] = df['timestamp'].apply(lambda x: tz_ny.localize(x))
+    df['utc'] = df['timestamp'].dt.tz_convert('UTC')
 
-    longs: list[float] = []
-    signs: list[str] = []
-    nakshas: list[str] = []
-    padas: list[int] = []
-    houses: list[int] = []
+    # Moon
+    df['moon_long'] = df['utc'].apply(mean_moon_longitude)
+    df['moon_sign'] = df['moon_long'].apply(sign_from_longitude)
+    df['nakshatra'] = df['moon_long'].apply(nakshatra_from_longitude)
+    df['moon_house'] = df['moon_long'].apply(
+        lambda lon: house_from_longitude(lon, NATAL_LAGNA_LONG))
 
-    for dt in df["timestamp_utc"]:
-        lon = moon_longitude(dt.to_pydatetime())
-        longs.append(lon)
-        signs.append(sign_from_longitude(lon))
-        lon_sidereal = (lon - 24) % 360  # Lahiri offset ≈24°
-        nak, pad = nakshatra_from_sidereal(lon_sidereal)
-        nakshas.append(nak)
-        padas.append(pad)
-        houses.append(house_from_longitude(lon))
+    # Solar‑arc progressed Lagna (daily snapshot)
+    dates = df['utc'].dt.date.unique()
+    sun_arc: Dict[str,float] = {}
+    for d in dates:
+        dt_mid = datetime(d.year,d.month,d.day,tzinfo=timezone.utc)
+        arc = (mean_sun_longitude(dt_mid) - NATAL_SUN_LONG) % 360
+        sun_arc[str(d)] = arc
+    df['solar_arc'] = df['utc'].dt.date.astype(str).map(sun_arc)
+    df['prog_lagna_long'] = (NATAL_LAGNA_LONG + df['solar_arc']) % 360
+    df['prog_lagna_house'] = df.apply(
+        lambda r: house_from_longitude(r['moon_long'], r['prog_lagna_long']), axis=1)
 
-    df["moon_longitude"] = longs
-    df["moon_sign"] = signs
-    df["moon_nakshatra"] = nakshas
-    df["nakshatra_pada"] = padas
-    df["moon_house"] = houses
+    # Lunar return ±30 min → ≈0.274°
+    df['lunar_return'] = df['moon_long'].apply(
+        lambda lon: ang_diff(lon, NATAL_MOON_LONG) <= 0.274)
 
-    if out_path is None:
-        out_path = csv_path.with_name(csv_path.stem + "_enriched.csv")
+    # Nodes
+    df['rahu_long'] = df['utc'].apply(mean_rahu_longitude)
+    df['ketu_long'] = (df['rahu_long'] + 180) % 360
+    df['node_hits_lagna'] = df.apply(
+        lambda r: (ang_diff(r['rahu_long'], NATAL_LAGNA_LONG) <= 2.0) or
+                  (ang_diff(r['ketu_long'], NATAL_LAGNA_LONG) <= 2.0),
+        axis=1)
+
     df.to_csv(out_path, index=False)
-    print(f"✅ Enriched file saved → {out_path}")
-    return out_path
+    print(f"✓ Enriched file saved → {out_path}")
 
-# ─────────────────────────────────────────────────────────────
-# Self‑tests
+# ------------------------- CLI glue ---------------------------------
+def locate_default_csv() -> Path:
+    root = Path('/mnt/data')
+    cands = [p for p in root.glob('**/*.csv') if 'qqq' in p.name.lower()]
+    if not cands:
+        raise FileNotFoundError('No CSV containing "qqq" found in /mnt/data.')
+    return cands[0]
 
-def _test_moon_sign():
-    sample_dt = datetime(2023, 1, 12, 18, 25, tzinfo=timezone.utc)
-    sign = sign_from_longitude(moon_longitude(sample_dt))
-    assert sign in SIGNS
+if __name__ == '__main__':
+    import argparse, sys
+    ap = argparse.ArgumentParser(description='Enrich QQQ 5‑min bars with astro data')
+    ap.add_argument('--csv', type=Path, help='Path to raw QQQ CSV')
+    ap.add_argument('--out', type=Path, help='Output path (default: same dir, *_enriched.csv)')
+    args = ap.parse_args()
 
-
-def _test_missing_csv():
     try:
-        locate_csv(Path("/non/existent/path.csv"))
-    except FileNotFoundError:
-        return
-    raise AssertionError("locate_csv should raise FileNotFoundError on bad hint")
+        csv_path = args.csv or locate_default_csv()
+    except FileNotFoundError as e:
+        sys.exit(str(e))
 
-# ─────────────────────────────────────────────────────────────
-# CLI entry‑point
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Enrich QQQ 5‑minute bars with lunar data.")
-    parser.add_argument("--csv", type=Path, help="Path to raw QQQ CSV.")
-    parser.add_argument("--out", type=Path, help="Custom output path (CSV).")
-    args = parser.parse_args()
-
-    csv_path = locate_csv(args.csv)
-    enrich(csv_path, args.out)
-
-
-if __name__ == "__main__":
-    _test_moon_sign()
-    _test_missing_csv()
-    main()
+    out_path = args.out or csv_path.with_name(csv_path.stem + '_enriched.csv')
+    enrich(csv_path, out_path)

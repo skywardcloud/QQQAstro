@@ -78,9 +78,11 @@ def ang_diff(a: float, b: float) -> float:
 def enrich(csv_path: Path, out_path: Path):
     tz_ny = pytz.timezone("America/New_York")
     df = pd.read_csv(csv_path)
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    if df['timestamp'].dt.tz is None or df['timestamp'].dt.tz.iloc[0] is None:
-        df['timestamp'] = df['timestamp'].apply(lambda x: tz_ny.localize(x))
+    df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+    if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
+        raise ValueError('Failed to parse "timestamp" column as datetime.')
+    if df['timestamp'].dt.tz is None:
+        df['timestamp'] = df['timestamp'].dt.tz_localize(tz_ny)
     df['utc'] = df['timestamp'].dt.tz_convert('UTC')
 
     # Moon

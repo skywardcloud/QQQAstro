@@ -79,14 +79,21 @@ def parse_timestamp(col: pd.Series, tz_ny) -> pd.Series:
     # Pass 2: ISO or other formats
     mask_nat = dt.isna()
     if mask_nat.any():
+        failing_to_parse_pass1 = col_clean[mask_nat]
         # This step might introduce timezone-aware datetime objects if
         # the inferred format includes timezone information (e.g., 'Z' or offset).
         # The original 'dt' series contains naive datetimes or NaT.
         # Assigning potentially aware datetimes here can make 'dt' a mixed-type series.
         parsed_second_pass = pd.to_datetime(
-            col_clean[mask_nat], errors="coerce", infer_datetime_format=True
+            failing_to_parse_pass1, errors="coerce", infer_datetime_format=True
         )
         dt.loc[mask_nat] = parsed_second_pass
+
+        # Temporary debugging: Check what still fails after pass 2
+        still_na_after_pass2 = parsed_second_pass.isna()
+        if still_na_after_pass2.any():
+            print("DEBUG: Failed to parse these values with infer_datetime_format:")
+            print(failing_to_parse_pass1[still_na_after_pass2].head())
 
     if dt.notna().sum() == 0:
         raise ValueError("Could not parse ANY timestamps – check raw data.")
@@ -112,15 +119,22 @@ def parse_timestamp(col: pd.Series, tz_ny) -> pd.Series:
         # Process naive timestamps: localize to tz_ny
         if naive_elements_mask.any():
             series_to_localize = active_dts[naive_elements_mask]
-            # series_to_localize contains naive pd.Timestamp objects (or similar datetime-like objects)
-            localized_naive = series_to_localize.dt.tz_localize(tz_ny, ambiguous='NaT', nonexistent='shift_forward')
+            # Ensure it's a datetime Series before trying to use .dt accessor
+            # This handles cases where series_to_localize might be object dtype
+            # but contains datetime-like objects.
+            datetime_series_to_localize = pd.to_datetime(series_to_localize, errors='coerce')
+            localized_naive = datetime_series_to_localize.dt.tz_localize(tz_ny, ambiguous='NaT', nonexistent='shift_forward')
             final_dt.loc[series_to_localize.index] = localized_naive
             
         # Process aware timestamps: convert to tz_ny
         if aware_elements_mask.any():
             series_to_convert = active_dts[aware_elements_mask]
-            # series_to_convert contains aware pd.Timestamp objects (or similar datetime-like objects)
-            converted_aware = series_to_convert.dt.tz_convert(tz_ny)
+            # Ensure it's a datetime Series before trying to use .dt accessor.
+            # For aware timestamps, pd.to_datetime might make them UTC if not already.
+            # However, since they are already aware, direct conversion is usually better.
+            # The key is that series_to_convert should already be full of pd.Timestamp objects with tzinfo.
+            datetime_series_to_convert = pd.to_datetime(series_to_convert, errors='coerce', utc=True) # Convert to UTC first if not already, then to NY
+            converted_aware = datetime_series_to_convert.dt.tz_convert(tz_ny)
             final_dt.loc[series_to_convert.index] = converted_aware
             
     return final_dt

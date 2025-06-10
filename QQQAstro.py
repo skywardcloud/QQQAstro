@@ -7,11 +7,18 @@ Adds:
   • Rahu/Ketu longitudes and ±2° Lagna‑contact flag
 
 Run:
+
+  python qqq_pipeline_v2.py --csv /path/to/QQQ.csv --out enriched.csv
+If --csv is omitted it tries to auto‑detect a QQQ‑named CSV in $QQQ_DATA_DIR
+(default: ./mnt/data)
+
   python QQQAstro.py --csv /path/to/QQQ.csv --out enriched.csv
 If --csv is omitted it tries to auto‑detect a QQQ‑named CSV in /mnt/data
+
 """
 
 import math
+import os
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Dict
@@ -112,16 +119,18 @@ def enrich(csv_path: Path, out_path: Path):
 
 # ------------------------- CLI glue ---------------------------------
 def locate_default_csv() -> Path:
-    root = Path('/mnt/data')
+    env_root = os.getenv('QQQ_DATA_DIR')
+    root = Path(env_root) if env_root else Path('./mnt/data')
     cands = [p for p in root.glob('**/*.csv') if 'qqq' in p.name.lower()]
     if not cands:
-        raise FileNotFoundError('No CSV containing "qqq" found in /mnt/data.')
+        raise FileNotFoundError(f'No CSV containing "qqq" found in {root}.')
     return cands[0]
 
 if __name__ == '__main__':
     import argparse, sys
     ap = argparse.ArgumentParser(description='Enrich QQQ 5‑min bars with astro data')
-    ap.add_argument('--csv', type=Path, help='Path to raw QQQ CSV')
+    ap.add_argument('--csv', type=Path,
+                    help='Path to raw QQQ CSV (default: search $QQQ_DATA_DIR)')
     ap.add_argument('--out', type=Path, help='Output path (default: same dir, *_enriched.csv)')
     args = ap.parse_args()
 

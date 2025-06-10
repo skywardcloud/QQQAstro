@@ -79,16 +79,49 @@ def parse_timestamp(col: pd.Series, tz_ny) -> pd.Series:
     # Pass 2: ISO or other formats
     mask_nat = dt.isna()
     if mask_nat.any():
-        dt.loc[mask_nat] = pd.to_datetime(
+        # This step might introduce timezone-aware datetime objects if
+        # the inferred format includes timezone information (e.g., 'Z' or offset).
+        # The original 'dt' series contains naive datetimes or NaT.
+        # Assigning potentially aware datetimes here can make 'dt' a mixed-type series.
+        parsed_second_pass = pd.to_datetime(
             col_clean[mask_nat], errors="coerce", infer_datetime_format=True
         )
+        dt.loc[mask_nat] = parsed_second_pass
 
     if dt.notna().sum() == 0:
         raise ValueError("Could not parse ANY timestamps – check raw data.")
 
-    # Attach NY tz to naive rows
-    dt = dt.dt.tz_localize(tz_ny, nonexistent="shift_forward")
-    return dt
+    # 'dt' can now be a Series containing NaT, naive datetimes, or aware datetimes.
+    # We need to convert all valid datetimes to tz_ny.
+
+    # Initialize the result series with the target timezone and NaT values.
+    # This ensures the correct dtype for the final Series.
+    final_dt = pd.Series([pd.NaT]*len(dt), index=dt.index, dtype=f"datetime64[ns, {tz_ny.zone}]")
+    
+    not_na_mask = dt.notna()
+    if not_na_mask.any():
+        # Work with the subset of dt that has actual datetime objects
+        active_dts = dt[not_na_mask]
+
+        # Identify naive and aware timestamps within active_dts.
+        # This list comprehension is generally efficient for attribute access.
+        is_naive_list = [ts.tzinfo is None for ts in active_dts]
+        naive_elements_mask = pd.Series(is_naive_list, index=active_dts.index)
+        aware_elements_mask = ~naive_elements_mask
+
+        # Process naive timestamps: localize to tz_ny
+        if naive_elements_mask.any():
+            naive_series = pd.to_datetime(active_dts[naive_elements_mask]) # Ensure datetime Series for .dt accessor
+            localized_naive = naive_series.dt.tz_localize(tz_ny, ambiguous='NaT', nonexistent='shift_forward')
+            final_dt.loc[naive_series.index] = localized_naive
+            
+        # Process aware timestamps: convert to tz_ny
+        if aware_elements_mask.any():
+            aware_series = pd.to_datetime(active_dts[aware_elements_mask]) # Ensure datetime Series for .dt accessor
+            converted_aware = aware_series.dt.tz_convert(tz_ny)
+            final_dt.loc[aware_series.index] = converted_aware
+            
+    return final_dt
 
 # ────────── core pipeline ──────────────────────────────────────────
 def enrich(csv_path: Path, out_path: Path) -> None:

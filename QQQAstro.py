@@ -23,8 +23,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Tuple
 
-import numpy as np  # noqa: F401 (may be useful later)
-import pandas as pd
+try:
+    import numpy as np  # noqa: F401 – optional helper
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    np = None
+
+try:
+    import pandas as pd
+except ModuleNotFoundError as exc:
+    raise SystemExit("✗ pandas is required but not installed.") from exc
+
 import pytz
 
 # ─────────────────────────────────────────────────────────────

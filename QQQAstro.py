@@ -7,7 +7,7 @@ Adds:
   • Rahu/Ketu longitudes and ±2° Lagna‑contact flag
 
 Run:
-  python qqq_pipeline_v2.py --csv /path/to/QQQ.csv --out enriched.csv
+  python QQQAstro.py --csv /path/to/QQQ.csv --out enriched.csv
 If --csv is omitted it tries to auto‑detect a QQQ‑named CSV in /mnt/data
 """
 

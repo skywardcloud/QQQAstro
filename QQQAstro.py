@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
-"""QQQ Astro Pipeline v2.2 (robust timestamps + warnings)
+"""
+QQQ Astro Pipeline v 2.4 – all-planet cusp-cross flags
+=====================================================
 
-Adds:
-  • Moon sign, nakshatra, NASDAQ‑Lagna house
-  • Solar‑arc progressed Lagna (daily snapshot)
-  • Lunar‑return flag (±30 min ≈ 0.274 °)
-  • Rahu/Ketu longitudes and ±2 ° Lagna‑contact flag
+Adds to every 5-min QQQ bar:
+  • Moon sign, nakshatra, house (Chalit-Taurus)
+  • Solar-arc progressed Lagna (daily snapshot)
+  • Lunar-return flag (± 0.274 ° ≈ 30 min)
+  • Rahu/Ketu ± 2 ° Lagna-hit flag
+  • Cusp-cross flags for Sun, Moon, Mercury, Venus,
+    Mars, Jupiter, Saturn, Uranus, Neptune, Pluto
+  • any_cusp_cross = OR of all planet flags
 
 Run:
-  python QQQAstro.py --csv /path/to/QQQ.csv --out enriched.csv
-If --csv is omitted the script searches $QQQ_DATA_DIR (fallback: ./mnt/data).
+  python QQQAstro.py --csv /path/to/QQQ.csv  --out enriched.csv
+If --csv is omitted, script searches $QQQ_DATA_DIR (fallback ./mnt/data).
 """
 
 import os
@@ -20,17 +25,15 @@ from typing import Dict
 import pandas as pd
 import pytz
 
-# ────────── natal constants ────────────────────────────────────────
-AYANAMSA          = 24.0        # crude sidereal shift
-NATAL_SUN_LONG    = 325.722     # Aquarius 25°43′22″
-NATAL_MOON_LONG   = 238.399     # Scorpio 28°23′55″
-NATAL_LAGNA_LONG  = 38.6225     # Taurus   8°37′21″
+# ── natal constants ───────────────────────────────────────────────
+AYANAMSA          = 24.0
+NATAL_SUN_LONG    = 325.722     # Aq 25°43′
+NATAL_MOON_LONG   = 238.399     # Sc 28°23′
+NATAL_LAGNA_LONG  = 38.6225     # Ta 08°37′
 J2000             = datetime(2000, 1, 1, 12, tzinfo=timezone.utc)
 
-SIGNS = [
-    "Aries","Taurus","Gemini","Cancer","Leo","Virgo",
-    "Libra","Scorpio","Sagittarius","Capricorn","Aquarius","Pisces"
-]
+SIGNS = ["Aries","Taurus","Gemini","Cancer","Leo","Virgo",
+         "Libra","Scorpio","Sagittarius","Capricorn","Aquarius","Pisces"]
 
 NAKSHATRAS = [
     "Ashwini","Bharani","Krittika","Rohini","Mrigashirsha","Ardra",
@@ -40,176 +43,145 @@ NAKSHATRAS = [
     "Shatabhisha","Purva Bhadrapada","Uttara Bhadrapada","Revati"
 ]
 
-# ────────── ephemeris helpers (mean orbits ~1° accuracy) ───────────
-def mean_moon_longitude(dt_utc: datetime) -> float:
-    d = (dt_utc - J2000).total_seconds() / 86400
-    return (218.316 + 13.176396 * d) % 360
+# ── mean longitudes (1-degree accuracy) ───────────────────────────
+def mean_longitude(base_deg: float, period_days: float, dt_utc: datetime) -> float:
+    days = (dt_utc - J2000).total_seconds() / 86400
+    return (base_deg + 360/period_days * days) % 360
 
-def mean_sun_longitude(dt_utc: datetime) -> float:
-    d = (dt_utc - J2000).total_seconds() / 86400
-    return (280.460 + 0.9856474 * d) % 360
+def moon_lon(dt):    return mean_longitude(218.316, 27.321582, dt)
+def sun_lon(dt):     return mean_longitude(280.460, 365.2422, dt)
+def mercury_lon(dt): return mean_longitude(60.750, 87.969, dt)
+def venus_lon(dt):   return mean_longitude(85.380, 224.701, dt)
+def mars_lon(dt):    return mean_longitude(293.527, 686.98, dt)
+def jupiter_lon(dt): return mean_longitude(238.049, 4332.59, dt)
+def saturn_lon(dt):  return mean_longitude(266.564, 10759.22, dt)
+def uranus_lon(dt):  return mean_longitude(314.055, 30685.4, dt)
+def neptune_lon(dt): return mean_longitude(304.348, 60189.0, dt)
+def pluto_lon(dt):   return mean_longitude(238.929, 90560.0, dt)
+def rahu_lon(dt):    return (125.04452 - 0.0529538083 *
+                             (dt - J2000).total_seconds()/86400) % 360
 
-def mean_rahu_longitude(dt_utc: datetime) -> float:
-    d = (dt_utc - J2000).total_seconds() / 86400
-    return (125.04452 - 0.0529538083 * d) % 360
+PLANET_FUNCS = {
+    'sun': sun_lon, 'moon': moon_lon, 'mercury': mercury_lon,
+    'venus': venus_lon, 'mars': mars_lon, 'jupiter': jupiter_lon,
+    'saturn': saturn_lon, 'uranus': uranus_lon,
+    'neptune': neptune_lon, 'pluto': pluto_lon,
+}
 
-# ────────── zodiac helpers ─────────────────────────────────────────
-def sign_from_longitude(lon: float) -> str:
-    return SIGNS[int(lon // 30)]
+# ── zodiac helpers ────────────────────────────────────────────────
+def sign_from_lon(lon):       return SIGNS[int(lon // 30)]
+def nakshatra_from_lon(lon):  return NAKSHATRAS[int(((lon-AYANAMSA)%360)//(360/27))]
+def house_from_lon(lon):      return int(((lon - NATAL_LAGNA_LONG) % 360) // 30) + 1
+def ang_diff(a,b):            return abs((a-b+180)%360 - 180)
 
-def nakshatra_from_longitude(lon: float) -> str:
-    sid = (lon - AYANAMSA) % 360
-    return NAKSHATRAS[int(sid // (360/27))]
+# House cusps (0 = Lagna, 30 = 2nd, …)
+CUSPS = [(NATAL_LAGNA_LONG + 30*i) % 360 for i in range(12)]
+CUSP_TOL = 0.05  # deg
 
-def house_from_longitude(lon: float, lagna_long: float) -> int:
-    return int(((lon - lagna_long) % 360) // 30) + 1
+def near_cusp(lon): return any(ang_diff(lon,c) <= CUSP_TOL for c in CUSPS)
 
-def ang_diff(a: float, b: float) -> float:
-    """Smallest absolute angular distance in degrees"""
-    return abs((a - b + 180) % 360 - 180)
+# ── robust timestamp parser ───────────────────────────────────────
+def parse_ts(series,pytz_ny):
+    s = pd.to_datetime(series.astype(str).str.strip(),
+                       format='%m/%d/%y %H:%M', errors='coerce')
+    mask = s.isna()
+    if mask.any():
+        s.loc[mask] = pd.to_datetime(series[mask], errors='coerce',
+                                     infer_datetime_format=True)
+    if s.notna().sum()==0:
+        raise ValueError("Could not parse ANY timestamps.")
 
-# ────────── robust timestamp parser ────────────────────────────────
-def parse_timestamp(col: pd.Series, tz_ny) -> pd.Series:
-    """Return tz‑aware NY datetimes; NaT for unparseable rows."""
-    col_clean = col.astype(str).str.strip()
+    # Ensure 's' is truly datetimelike before using .dt accessor.
+    # The previous steps should ideally result in a datetime64[ns] Series if parsing was successful.
+    # However, if 's' ended up as an object Series with mixed types (e.g. some datetimes, some strings),
+    # this explicit coercion will standardize it to datetime64[ns], turning unparseable items to NaT.
+    s = pd.to_datetime(s, errors='coerce')
 
-    # Pass 1: explicit M/D/YY H:M
-    dt = pd.to_datetime(col_clean, format="%m/%d/%y %H:%M", errors="coerce")
+    # After final coercion, re-check if any valid datetimes remain.
+    # This handles cases where initial s.notna().sum() > 0 was due to non-datetime objects
+    # (e.g. strings) that were not successfully converted to datetimes.
+    if s.notna().sum() == 0:
+        raise ValueError("Timestamp-like data found but could not be definitively parsed into datetime objects after final coercion.")
 
-    # Pass 2: ISO or other formats
-    mask_nat = dt.isna()
-    if mask_nat.any():
-        failing_to_parse_pass1 = col_clean[mask_nat]
-        # This step might introduce timezone-aware datetime objects if
-        # the inferred format includes timezone information (e.g., 'Z' or offset).
-        # The original 'dt' series contains naive datetimes or NaT.
-        # Assigning potentially aware datetimes here can make 'dt' a mixed-type series.
-        parsed_second_pass = pd.to_datetime(
-            failing_to_parse_pass1, errors="coerce", infer_datetime_format=True
-        )
-        dt.loc[mask_nat] = parsed_second_pass
+    # Check if the Series is already timezone-aware
+    if s.dt.tz is not None:
+        # If already aware, convert to the target New York timezone
+        return s.dt.tz_convert(pytz_ny)
+    else:
+        # If naive, localize to the New York timezone
+        return s.dt.tz_localize(pytz_ny, nonexistent='shift_forward')
 
-        # Temporary debugging: Check what still fails after pass 2
-        still_na_after_pass2 = parsed_second_pass.isna()
-        if still_na_after_pass2.any():
-            print("DEBUG: Failed to parse these values with infer_datetime_format:")
-            print(failing_to_parse_pass1[still_na_after_pass2].head())
-
-    if dt.notna().sum() == 0:
-        raise ValueError("Could not parse ANY timestamps – check raw data.")
-
-    # 'dt' can now be a Series containing NaT, naive datetimes, or aware datetimes.
-    # We need to convert all valid datetimes to tz_ny.
-
-    # Initialize the result series with the target timezone and NaT values.
-    # This ensures the correct dtype for the final Series.
-    final_dt = pd.Series([pd.NaT]*len(dt), index=dt.index, dtype=f"datetime64[ns, {tz_ny.zone}]")
-    
-    not_na_mask = dt.notna()
-    if not_na_mask.any():
-        # Work with the subset of dt that has actual datetime objects
-        active_dts = dt[not_na_mask]
-
-        # Identify naive and aware timestamps within active_dts.
-        # This list comprehension is generally efficient for attribute access.
-        is_naive_list = [ts.tzinfo is None for ts in active_dts]
-        naive_elements_mask = pd.Series(is_naive_list, index=active_dts.index)
-        aware_elements_mask = ~naive_elements_mask
-
-        # Process naive timestamps: localize to tz_ny
-        if naive_elements_mask.any():
-            series_to_localize = active_dts[naive_elements_mask]
-            # Ensure it's a datetime Series before trying to use .dt accessor
-            # This handles cases where series_to_localize might be object dtype
-            # but contains datetime-like objects.
-            datetime_series_to_localize = pd.to_datetime(series_to_localize, errors='coerce')
-            localized_naive = datetime_series_to_localize.dt.tz_localize(tz_ny, ambiguous='NaT', nonexistent='shift_forward')
-            final_dt.loc[series_to_localize.index] = localized_naive
-            
-        # Process aware timestamps: convert to tz_ny
-        if aware_elements_mask.any():
-            series_to_convert = active_dts[aware_elements_mask]
-            # Ensure it's a datetime Series before trying to use .dt accessor.
-            # For aware timestamps, pd.to_datetime might make them UTC if not already.
-            # However, since they are already aware, direct conversion is usually better.
-            # The key is that series_to_convert should already be full of pd.Timestamp objects with tzinfo.
-            datetime_series_to_convert = pd.to_datetime(series_to_convert, errors='coerce', utc=True) # Convert to UTC first if not already, then to NY
-            converted_aware = datetime_series_to_convert.dt.tz_convert(tz_ny)
-            final_dt.loc[series_to_convert.index] = converted_aware
-            
-    return final_dt
-
-# ────────── core pipeline ──────────────────────────────────────────
-def enrich(csv_path: Path, out_path: Path) -> None:
-    tz_ny = pytz.timezone("America/New_York")
+# ── pipeline ──────────────────────────────────────────────────────
+def enrich(csv_path: Path, out_path: Path):
+    ny = pytz.timezone('America/New_York')
     df = pd.read_csv(csv_path)
 
-    # 1️⃣ Parse timestamps
-    df["timestamp"] = parse_timestamp(df["timestamp"], tz_ny)
-    bad = df["timestamp"].isna().sum()
+    df['timestamp'] = parse_ts(df['timestamp'], ny)
+    bad = df['timestamp'].isna().sum()
     if bad:
-        print(f"⚠︎  {bad} rows removed due to invalid timestamps.")
-        df = df.dropna(subset=["timestamp"])
-    df["utc"] = df["timestamp"].dt.tz_convert("UTC")
+        print(f"⚠︎  {bad} timestamp rows dropped.")
+        df = df.dropna(subset=['timestamp'])
+    df['utc'] = df['timestamp'].dt.tz_convert('UTC')
 
-    # 2️⃣ Moon sign / nakshatra / house
-    df["moon_long"]   = df["utc"].apply(mean_moon_longitude)
-    df["moon_sign"]   = df["moon_long"].apply(sign_from_longitude)
-    df["nakshatra"]   = df["moon_long"].apply(nakshatra_from_longitude)
-    df["moon_house"]  = df["moon_long"].apply(
-        lambda lon: house_from_longitude(lon, NATAL_LAGNA_LONG)
-    )
+    # Moon sign / nakshatra / house
+    df['moon_long'] = df['utc'].apply(moon_lon)
+    df['moon_sign'] = df['moon_long'].apply(sign_from_lon)
+    df['nakshatra'] = df['moon_long'].apply(nakshatra_from_lon)
+    df['moon_house'] = df['moon_long'].apply(house_from_lon)
 
-    # 3️⃣ Solar‑arc progressed Lagna (daily)
-    sun_arc: Dict[str, float] = {}
-    for d in df["utc"].dt.date.unique():
-        dt_mid = datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
-        sun_arc[str(d)] = (mean_sun_longitude(dt_mid) - NATAL_SUN_LONG) % 360
-    df["solar_arc"]        = df["utc"].dt.date.astype(str).map(sun_arc)
-    df["prog_lagna_long"]  = (NATAL_LAGNA_LONG + df["solar_arc"]) % 360
-    df["prog_lagna_house"] = df.apply(
-        lambda r: house_from_longitude(r["moon_long"], r["prog_lagna_long"]),
-        axis=1
-    )
+    # Solar-arc progressed Lagna
+    daily_arc = {}
+    for d in df['utc'].dt.date.unique():
+        dt = datetime(d.year,d.month,d.day,tzinfo=timezone.utc)
+        daily_arc[str(d)] = (sun_lon(dt) - NATAL_SUN_LONG) % 360
+    df['solar_arc'] = df['utc'].dt.date.astype(str).map(daily_arc)
+    df['prog_lagna_long'] = (NATAL_LAGNA_LONG + df['solar_arc']) % 360
+    df['prog_lagna_house']= df.apply(
+        lambda r: house_from_lon(r['moon_long']-r['solar_arc']), axis=1)
 
-    # 4️⃣ Lunar return flag (±0.274° ≈ 30 min)
-    df["lunar_return"] = df["moon_long"].apply(
-        lambda lon: ang_diff(lon, NATAL_MOON_LONG) <= 0.274
-    )
+    # Lunar return flag
+    df['lunar_return'] = df['moon_long'].apply(
+        lambda L: ang_diff(L, NATAL_MOON_LONG) <= 0.274)
 
-    # 5️⃣ Rahu / Ketu + Lagna contact (±2°)
-    df["rahu_long"] = df["utc"].apply(mean_rahu_longitude)
-    df["ketu_long"] = (df["rahu_long"] + 180) % 360
-    df["node_hits_lagna"] = df.apply(
-        lambda r: ang_diff(r["rahu_long"], NATAL_LAGNA_LONG) <= 2.0
-               or ang_diff(r["ketu_long"], NATAL_LAGNA_LONG) <= 2.0,
-        axis=1
-    )
+    # Node–Lagna hit
+    df['rahu_long'] = df['utc'].apply(rahu_lon)
+    df['ketu_long'] = (df['rahu_long'] + 180) % 360
+    df['node_hits_lagna'] = df.apply(
+        lambda r: ang_diff(r['rahu_long'],NATAL_LAGNA_LONG)<=2 or
+                  ang_diff(r['ketu_long'],NATAL_LAGNA_LONG)<=2, axis=1)
+
+    # Planet cusp-cross flags
+    for name,func in PLANET_FUNCS.items():
+        col_long = f"{name}_long"
+        col_flag = f"{name}_cusp_cross"
+        df[col_long] = df['utc'].apply(func)
+        df[col_flag] = df[col_long].apply(near_cusp)
+
+    cusp_cols = [c for c in df.columns if c.endswith('_cusp_cross')]
+    df['any_cusp_cross'] = df[cusp_cols].any(axis=1)
 
     df.to_csv(out_path, index=False)
     print(f"✓ Enriched file saved → {out_path}")
 
-# ────────── CLI helpers ────────────────────────────────────────────
-def locate_default_csv() -> Path:
-    root = Path(os.getenv("QQQ_DATA_DIR", "./mnt/data"))
-    cands = [p for p in root.glob("**/*.csv") if "qqq" in p.name.lower()]
+# ── CLI glue ──────────────────────────────────────────────────────
+def locate_csv():
+    root = Path(os.getenv('QQQ_DATA_DIR','./mnt/data'))
+    cands=[p for p in root.glob('**/*.csv') if 'qqq' in p.name.lower()]
     if not cands:
-        raise FileNotFoundError(f'No CSV containing "qqq" found in {root}.')
+        raise FileNotFoundError(f'No QQQ CSV found in {root}')
     return cands[0]
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     import argparse, sys
-    ap = argparse.ArgumentParser(description="Enrich QQQ 5‑min bars with astro data")
-    ap.add_argument("--csv", type=Path,
-                    help="Path to raw QQQ CSV (default: search $QQQ_DATA_DIR)")
-    ap.add_argument("--out", type=Path,
-                    help="Output path (default: same dir, *_enriched.csv)")
+    ap = argparse.ArgumentParser(description='Enrich QQQ 5-min bars with astro data (all planets)')
+    ap.add_argument('--csv', type=Path, help='Path to raw QQQ CSV')
+    ap.add_argument('--out', type=Path, help='Output CSV (default *_enriched.csv)')
     args = ap.parse_args()
 
     try:
-        csv_path = args.csv or locate_default_csv()
+        csv_path = args.csv or locate_csv()
     except FileNotFoundError as e:
         sys.exit(str(e))
 
-    out_path = args.out or csv_path.with_name(csv_path.stem + "_enriched.csv")
+    out_path = args.out or csv_path.with_name(csv_path.stem+'_enriched.csv')
     enrich(csv_path, out_path)

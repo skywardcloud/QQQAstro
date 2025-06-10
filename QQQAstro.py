@@ -76,7 +76,7 @@ def ang_diff(a,b):            return abs((a-b+180)%360 - 180)
 
 # House cusps (0 = Lagna, 30 = 2nd, …)
 CUSPS = [(NATAL_LAGNA_LONG + 30*i) % 360 for i in range(12)]
-CUSP_TOL = 0.05  # deg
+CUSP_TOL = 0.5  # deg
 
 def near_cusp(lon): return any(ang_diff(lon,c) <= CUSP_TOL for c in CUSPS)
 

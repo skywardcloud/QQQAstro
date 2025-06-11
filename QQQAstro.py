@@ -2,7 +2,6 @@
 """
 QQQ Astro Pipeline v 2.5 – High-Precision Ephemeris
 ===================================================
-
 Adds to every 5-min QQQ bar:
   • Moon sign, nakshatra, house (Chalit-Taurus)
   • Solar-arc progressed Lagna (daily snapshot)
@@ -11,6 +10,7 @@ Adds to every 5-min QQQ bar:
   • Cusp-cross flags for Sun, Moon, Mercury, Venus,
     Mars, Jupiter, Saturn, Uranus, Neptune, Pluto
     (Planetary longitudes calculated using Skyfield and JPL DE441 ephemeris)
+  • Hora (planetary hour lord) for New York time
   • any_cusp_cross = OR of all planet flags
 
 Run:
@@ -20,12 +20,15 @@ If --csv is omitted, script searches $QQQ_DATA_DIR (fallback ./mnt/data).
 
 import os
 from pathlib import Path
-from datetime import datetime, timezone
-from typing import Dict
+from datetime import datetime, timezone, timedelta
+from typing import Dict, Union # Union for type hint
 
 import pandas as pd
 import pytz
 from skyfield.api import load as skyfield_load
+# Add to imports
+from skyfield.api import Topos # For geographic location
+from skyfield import almanac   # For sunrise/sunset calculations
 from skyfield.framelib import ecliptic_frame
 
 # IMPORTANT: If skyfield is not installed, run: pip install skyfield
@@ -47,6 +50,24 @@ NAKSHATRAS = [
     "Mula","Purva Ashadha","Uttara Ashadha","Shravana","Dhanishta",
     "Shatabhisha","Purva Bhadrapada","Uttara Bhadrapada","Revati"
 ]
+
+# ── Hora Calculation Constants ────────────────────────────────────
+NY_LATITUDE = 40.7128    # Approximate latitude for New York City
+NY_LONGITUDE = -74.0060  # Approximate longitude for New York City
+
+# Day Lords: datetime.weekday() Monday is 0 and Sunday is 6
+DAY_LORD_MAP = {
+    0: "Moon",    # Monday
+    1: "Mars",    # Tuesday
+    2: "Mercury", # Wednesday
+    3: "Jupiter", # Thursday
+    4: "Venus",   # Friday
+    5: "Saturn",  # Saturday
+    6: "Sun"      # Sunday
+}
+
+# Sequence of Hora rulers (Chaldean order, applied cyclically starting with Day Lord)
+HORA_RULER_SEQUENCE = ["Sun", "Venus", "Mercury", "Moon", "Saturn", "Jupiter", "Mars"]
 
 # ── Skyfield Ephemeris Setup ──────────────────────────────────────
 # This will download de441.bsp (approx 18MB for 1550-2650 range)
@@ -111,6 +132,105 @@ CUSPS = [(NATAL_LAGNA_LONG + 30*i) % 360 for i in range(12)]
 CUSP_TOL = 0.5  # deg
 
 def near_cusp(lon): return any(ang_diff(lon,c) <= CUSP_TOL for c in CUSPS)
+
+# ── Hora Calculation Helpers ──────────────────────────────────────
+
+def get_sunrise_utc_for_date(target_date_obj: datetime.date,
+                             ny_topos_obj: Topos,
+                             ny_timezone_obj: pytz.BaseTzInfo,
+                             sunrise_cache_dict: Dict[datetime.date, Union[datetime, None]]) -> Union[datetime, None]:
+    """
+    Calculates and caches the UTC sunrise time for a given date in New York.
+    Uses global EPH and SF_TIMESCALER.
+    """
+    if target_date_obj in sunrise_cache_dict:
+        return sunrise_cache_dict[target_date_obj]
+
+    # Define the search window for sunrise on target_date_obj (NY time), converted to UTC for Skyfield
+    dt_start_ny_naive = datetime.combine(target_date_obj, datetime.min.time())
+    dt_start_ny_aware = ny_timezone_obj.localize(dt_start_ny_naive)
+    
+    # Search up to the start of the next NY day to ensure we capture the sunrise for target_date_obj
+    dt_end_ny_naive = datetime.combine(target_date_obj + timedelta(days=1), datetime.min.time())
+    dt_end_ny_aware = ny_timezone_obj.localize(dt_end_ny_naive)
+
+    t0 = SF_TIMESCALER.from_datetime(dt_start_ny_aware.astimezone(timezone.utc))
+    t1 = SF_TIMESCALER.from_datetime(dt_end_ny_aware.astimezone(timezone.utc))
+
+    f = almanac.sunrise_sunset(EPH, ny_topos_obj)
+    times_utc_skyfield, events = almanac.find_discrete(t0, t1, f)
+
+    sunrise_dt_utc_val = None
+    for t_sf, event_is_sunrise in zip(times_utc_skyfield, events):
+        if event_is_sunrise:  # event == 1 means sunrise
+            potential_sunrise_utc = t_sf.utc_datetime()
+            # Ensure this sunrise, when viewed in NY time, falls on the target_date_obj
+            potential_sunrise_ny = potential_sunrise_utc.replace(tzinfo=timezone.utc).astimezone(ny_timezone_obj)
+            if potential_sunrise_ny.date() == target_date_obj:
+                sunrise_dt_utc_val = potential_sunrise_utc
+                break  # Found the correct sunrise for the target NY date
+
+    if sunrise_dt_utc_val is None:
+        print(f"⚠️  Warning: Could not determine sunrise for {target_date_obj} in New York.")
+    
+    sunrise_cache_dict[target_date_obj] = sunrise_dt_utc_val
+    return sunrise_dt_utc_val
+
+def calculate_hora(timestamp_ny_aware: pd.Timestamp,
+                   ny_topos_obj: Topos,
+                   ny_timezone_obj: pytz.BaseTzInfo,
+                   sunrise_cache_dict: Dict[datetime.date, Union[datetime, None]]) -> Union[str, None]:
+    """
+    Calculates the Hora lord for a given New York timestamp.
+    Uses global DAY_LORD_MAP, HORA_RULER_SEQUENCE.
+    """
+    current_date_obj = timestamp_ny_aware.date()
+    
+    sunrise_today_utc = get_sunrise_utc_for_date(current_date_obj, ny_topos_obj, ny_timezone_obj, sunrise_cache_dict)
+
+    effective_sunrise_ny = None
+    effective_day_of_week = -1
+
+    if sunrise_today_utc is not None:
+        sunrise_today_ny_aware = sunrise_today_utc.replace(tzinfo=timezone.utc).astimezone(ny_timezone_obj)
+        if timestamp_ny_aware < sunrise_today_ny_aware:
+            previous_date_obj = current_date_obj - timedelta(days=1)
+            sunrise_previous_day_utc = get_sunrise_utc_for_date(previous_date_obj, ny_topos_obj, ny_timezone_obj, sunrise_cache_dict)
+            if sunrise_previous_day_utc is None:
+                print(f"⚠️ Warning: Cannot determine Hora for {timestamp_ny_aware} as previous day's ({previous_date_obj}) sunrise is unknown.")
+                return None
+            effective_sunrise_ny = sunrise_previous_day_utc.replace(tzinfo=timezone.utc).astimezone(ny_timezone_obj)
+            effective_day_of_week = previous_date_obj.weekday()
+        else:
+            effective_sunrise_ny = sunrise_today_ny_aware
+            effective_day_of_week = current_date_obj.weekday()
+    else:
+        print(f"⚠️ Warning: Cannot determine Hora for {timestamp_ny_aware} as today's ({current_date_obj}) sunrise is unknown.")
+        return None
+
+    if effective_sunrise_ny is None: return None
+
+    day_lord = DAY_LORD_MAP.get(effective_day_of_week)
+    if day_lord is None:
+        print(f"Error: Could not map weekday {effective_day_of_week} to a day lord for {timestamp_ny_aware}.")
+        return None
+
+    time_diff_seconds = (timestamp_ny_aware - effective_sunrise_ny).total_seconds()
+
+    if time_diff_seconds < 0:
+        print(f"⚠️ Warning: Timestamp {timestamp_ny_aware} is earlier than its effective sunrise {effective_sunrise_ny}. Hora cannot be calculated.")
+        return None
+        
+    hours_passed = int(time_diff_seconds / 3600)
+
+    try:
+        start_lord_idx = HORA_RULER_SEQUENCE.index(day_lord)
+    except ValueError:
+        print(f"Error: Day lord '{day_lord}' not found in HORA_RULER_SEQUENCE for {timestamp_ny_aware}.")
+        return None
+
+    hora_lord_idx = (start_lord_idx + hours_passed) % len(HORA_RULER_SEQUENCE)
+    return HORA_RULER_SEQUENCE[hora_lord_idx]
 
 # ── robust timestamp parser ───────────────────────────────────────
 def parse_ts(series_input: pd.Series, pytz_ny: pytz.BaseTzInfo) -> pd.Series:
@@ -200,6 +320,27 @@ def enrich(csv_path: Path, out_path: Path):
         return
 
     df['utc'] = df['timestamp'].dt.tz_convert('UTC')
+
+    # Hora Calculation Setup
+    ny_topos = Topos(latitude_degrees=NY_LATITUDE, longitude_degrees=NY_LONGITUDE)
+    sunrise_cache_utc: Dict[datetime.date, Union[datetime, None]] = {} # Initialize cache for sunrise times
+
+    # Pre-populate sunrise cache for all relevant dates
+    if not df.empty:
+        # df['timestamp'] is already NY-localized and NaTs are dropped
+        all_unique_dates_in_df = df['timestamp'].dt.date.unique()
+        
+        required_dates_for_sunrise = set()
+        for date_obj_val in all_unique_dates_in_df:
+            required_dates_for_sunrise.add(date_obj_val) # For "today's sunrise"
+            required_dates_for_sunrise.add(date_obj_val - timedelta(days=1)) # For "previous day's sunrise"
+
+        print(f"ℹ️  Pre-calculating sunrises for {len(required_dates_for_sunrise)} unique NY dates...")
+        for date_to_calc in sorted(list(required_dates_for_sunrise)): # Sorted for consistent processing
+            get_sunrise_utc_for_date(date_to_calc, ny_topos, ny, sunrise_cache_utc)
+        print("✓ Sunrises pre-calculated.")
+
+    df['hora'] = df.apply(lambda row: calculate_hora(row['timestamp'], ny_topos, ny, sunrise_cache_utc), axis=1)
 
     # Moon sign / nakshatra / house
     df['moon_long'] = df['utc'].apply(moon_lon)

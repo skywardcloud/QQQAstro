@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-QQQ Astro Pipeline v 2.4 – all-planet cusp-cross flags
-=====================================================
+QQQ Astro Pipeline v 2.5 – High-Precision Ephemeris
+===================================================
 
 Adds to every 5-min QQQ bar:
   • Moon sign, nakshatra, house (Chalit-Taurus)
@@ -10,6 +10,7 @@ Adds to every 5-min QQQ bar:
   • Rahu/Ketu ± 2 ° Lagna-hit flag
   • Cusp-cross flags for Sun, Moon, Mercury, Venus,
     Mars, Jupiter, Saturn, Uranus, Neptune, Pluto
+    (Planetary longitudes calculated using Skyfield and JPL DE441 ephemeris)
   • any_cusp_cross = OR of all planet flags
 
 Run:
@@ -24,6 +25,10 @@ from typing import Dict
 
 import pandas as pd
 import pytz
+from skyfield.api import load as skyfield_load
+from skyfield.framelib import ecliptic_frame
+
+# IMPORTANT: If skyfield is not installed, run: pip install skyfield
 
 # ── natal constants ───────────────────────────────────────────────
 AYANAMSA          = 24.0
@@ -43,21 +48,48 @@ NAKSHATRAS = [
     "Shatabhisha","Purva Bhadrapada","Uttara Bhadrapada","Revati"
 ]
 
-# ── mean longitudes (1-degree accuracy) ───────────────────────────
-def mean_longitude(base_deg: float, period_days: float, dt_utc: datetime) -> float:
-    days = (dt_utc - J2000).total_seconds() / 86400
-    return (base_deg + 360/period_days * days) % 360
+# ── Skyfield Ephemeris Setup ──────────────────────────────────────
+# This will download de441.bsp (approx 18MB for 1550-2650 range)
+# to Skyfield's default cache directory on first run if not already present.
+EPH = skyfield_load('de441.bsp')
 
-def moon_lon(dt):    return mean_longitude(218.316, 27.321582, dt)
-def sun_lon(dt):     return mean_longitude(280.460, 365.2422, dt)
-def mercury_lon(dt): return mean_longitude(60.750, 87.969, dt)
-def venus_lon(dt):   return mean_longitude(85.380, 224.701, dt)
-def mars_lon(dt):    return mean_longitude(293.527, 686.98, dt)
-def jupiter_lon(dt): return mean_longitude(238.049, 4332.59, dt)
-def saturn_lon(dt):  return mean_longitude(266.564, 10759.22, dt)
-def uranus_lon(dt):  return mean_longitude(314.055, 30685.4, dt)
-def neptune_lon(dt): return mean_longitude(304.348, 60189.0, dt)
-def pluto_lon(dt):   return mean_longitude(238.929, 90560.0, dt)
+SF_EARTH = EPH['earth']
+SF_PLANET_MAPPING = {
+    'sun': EPH['sun'],
+    'moon': EPH['moon'],
+    'mercury': EPH['mercury'], # Mercury planet itself
+    'venus': EPH['venus'],   # Venus planet itself
+    'mars': EPH['mars barycenter'], # Mars system barycenter
+    'jupiter': EPH['jupiter barycenter'],
+    'saturn': EPH['saturn barycenter'],
+    'uranus': EPH['uranus barycenter'],
+    'neptune': EPH['neptune barycenter'],
+    'pluto': EPH['pluto barycenter'],
+}
+SF_TIMESCALER = skyfield_load.timescale()
+
+def _get_skyfield_longitude(planet_key: str, dt_utc: datetime) -> float:
+    """Helper to get apparent geocentric ecliptic longitude from Skyfield."""
+    skyfield_body = SF_PLANET_MAPPING[planet_key]
+    t = SF_TIMESCALER.from_datetime(dt_utc)
+    astrometric = SF_EARTH.at(t).observe(skyfield_body)
+    # Apparent geocentric ecliptic longitude of date
+    _lat, lon, _dist = astrometric.apparent().ecliptic_latlon(epoch=t)
+    return lon.degrees
+
+# ── High-Precision Planetary Longitudes ───────────────────────────
+def sun_lon(dt_utc: datetime) -> float:     return _get_skyfield_longitude('sun', dt_utc)
+def moon_lon(dt_utc: datetime) -> float:    return _get_skyfield_longitude('moon', dt_utc)
+def mercury_lon(dt_utc: datetime) -> float: return _get_skyfield_longitude('mercury', dt_utc)
+def venus_lon(dt_utc: datetime) -> float:   return _get_skyfield_longitude('venus', dt_utc)
+def mars_lon(dt_utc: datetime) -> float:    return _get_skyfield_longitude('mars', dt_utc)
+def jupiter_lon(dt_utc: datetime) -> float: return _get_skyfield_longitude('jupiter', dt_utc)
+def saturn_lon(dt_utc: datetime) -> float:  return _get_skyfield_longitude('saturn', dt_utc)
+def uranus_lon(dt_utc: datetime) -> float:  return _get_skyfield_longitude('uranus', dt_utc)
+def neptune_lon(dt_utc: datetime) -> float: return _get_skyfield_longitude('neptune', dt_utc)
+def pluto_lon(dt_utc: datetime) -> float:   return _get_skyfield_longitude('pluto', dt_utc)
+
+# Mean Rahu (North Node) - calculation remains the same
 def rahu_lon(dt):    return (125.04452 - 0.0529538083 *
                              (dt - J2000).total_seconds()/86400) % 360
 

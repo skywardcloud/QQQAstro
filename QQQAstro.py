@@ -81,46 +81,92 @@ CUSP_TOL = 0.5  # deg
 def near_cusp(lon): return any(ang_diff(lon,c) <= CUSP_TOL for c in CUSPS)
 
 # ── robust timestamp parser ───────────────────────────────────────
-def parse_ts(series,pytz_ny):
-    s = pd.to_datetime(series.astype(str).str.strip(),
+def parse_ts(series_input: pd.Series, pytz_ny: pytz.BaseTzInfo) -> pd.Series:
+    series_str = series_input.astype(str).str.strip()
+
+    # Initialize final result series (object dtype to hold tz-aware timestamps before final coercion)
+    s_final_ny = pd.Series([pd.NaT] * len(series_str), index=series_str.index, dtype=object)
+
+    # --- Attempt 1: Strict format, assumed to be NY naive time ---
+    s_attempt1_naive = pd.to_datetime(series_str,
                        format='%m/%d/%y %H:%M', errors='coerce')
-    mask = s.isna()
-    if mask.any():
-        s.loc[mask] = pd.to_datetime(series[mask], errors='coerce',
-                                     infer_datetime_format=True)
-    if s.notna().sum()==0:
-        raise ValueError("Could not parse ANY timestamps.")
+    
+    mask_attempt1_success = s_attempt1_naive.notna()
+    if mask_attempt1_success.any():
+        # Localize these naive NY times to NY timezone
+        localized_vals = s_attempt1_naive[mask_attempt1_success].dt.tz_localize(
+            pytz_ny, nonexistent='shift_forward'
+        )
+        s_final_ny.loc[mask_attempt1_success] = localized_vals
 
-    # Ensure 's' is truly datetimelike before using .dt accessor.
-    # The previous steps should ideally result in a datetime64[ns] Series if parsing was successful.
-    # However, if 's' ended up as an object Series with mixed types (e.g. some datetimes, some strings),
-    # this explicit coercion will standardize it to datetime64[ns], turning unparseable items to NaT.
-    s = pd.to_datetime(s, errors='coerce')
+    # --- Attempt 2: For those that failed Attempt 1 (e.g. due to offsets or different format) ---
+    mask_needs_inference = ~mask_attempt1_success
+    if mask_needs_inference.any():
+        strings_for_inference = series_str[mask_needs_inference]
+        
+        # Parse with inference. utc=True converts offset strings to UTC; naive strings remain naive.
+        s_inferred = pd.to_datetime(
+            strings_for_inference, 
+            errors='coerce', 
+            utc=True 
+        )
 
-    # After final coercion, re-check if any valid datetimes remain.
-    # This handles cases where initial s.notna().sum() > 0 was due to non-datetime objects
-    # (e.g. strings) that were not successfully converted to datetimes.
-    if s.notna().sum() == 0:
-        raise ValueError("Timestamp-like data found but could not be definitively parsed into datetime objects after final coercion.")
+        # Process successfully parsed inferred values (which are on the subset of rows)
+        for idx, ts_val in s_inferred.items(): # Iterate over the subset defined by strings_for_inference.index
+            if pd.isna(ts_val):
+                # This is where parsing with utc=True failed for this specific string
+                # that didn't match the initial format '%m/%d/%y %H:%M'.
+                original_string_that_failed = series_str.loc[idx] # Get original string from series_str using the index
+                print(f"[DEBUG parse_ts] Inference with utc=True failed for original string: '{original_string_that_failed}'")
+                continue # s_final_ny already has NaT for this idx if not set by format match
 
-    # Check if the Series is already timezone-aware
-    if s.dt.tz is not None:
-        # If already aware, convert to the target New York timezone
-        return s.dt.tz_convert(pytz_ny)
-    else:
-        # If naive, localize to the New York timezone
-        return s.dt.tz_localize(pytz_ny, nonexistent='shift_forward')
+            if ts_val.tzinfo is not None: # It's timezone-aware (parsed as UTC)
+                s_final_ny.loc[idx] = ts_val.tz_convert(pytz_ny)
+            else: # It's naive (parsed from a string without an offset by inference)
+                  # Assume these naive times are NY local time.
+                s_final_ny.loc[idx] = pytz_ny.localize(ts_val, nonexistent='shift_forward')
+
+    # Convert s_final_ny (object dtype) to a proper timezone-aware datetime Series
+    s_final_ny = pd.to_datetime(s_final_ny, errors='coerce')
+    
+    # Ensure the final series has the target timezone, even if all values are NaT
+    if s_final_ny.dt.tz is None and pytz_ny is not None:
+        s_final_ny = s_final_ny.dt.tz_localize(pytz_ny, nonexistent='shift_forward', ambiguous='NaT')
+    elif s_final_ny.dt.tz is not None and str(s_final_ny.dt.tz) != str(pytz_ny.zone):
+        s_final_ny = s_final_ny.dt.tz_convert(pytz_ny)
+
+    if s_final_ny.notna().sum() == 0:
+        potential_timestamps = series_input.astype(str).str.strip().str.contains(r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{1,2}:\d{2}')
+        if potential_timestamps.any() and series_input[potential_timestamps].str.strip().any():
+             raise ValueError("Timestamp-like data found but could not be definitively parsed into datetime objects after all attempts.")
+            
+    return s_final_ny
 
 # ── pipeline ──────────────────────────────────────────────────────
 def enrich(csv_path: Path, out_path: Path):
+    print(f"ℹ️  Processing input CSV: {csv_path}")
     ny = pytz.timezone('America/New_York')
     df = pd.read_csv(csv_path)
+    
+    # Keep a copy of original timestamp strings for diagnostics
+    original_timestamps_series = df['timestamp'].copy() 
 
-    df['timestamp'] = parse_ts(df['timestamp'], ny)
-    bad = df['timestamp'].isna().sum()
-    if bad:
-        print(f"⚠︎  {bad} timestamp rows dropped.")
+    df['timestamp'] = parse_ts(df['timestamp'], ny) # Attempt to parse
+    
+    bad_rows_mask = df['timestamp'].isna()
+    num_bad_rows = bad_rows_mask.sum()
+
+    if num_bad_rows > 0:
+        print(f"⚠︎  {num_bad_rows} timestamp rows will be dropped due to parsing errors.")
+        print("Original timestamp values from your input CSV that could not be parsed:")
+        print(original_timestamps_series[bad_rows_mask]) # Print the problematic original strings
         df = df.dropna(subset=['timestamp'])
+
+    if df.empty: # Check if all rows were dropped
+        print(f"🛑 Error: All {len(original_timestamps_series)} rows were dropped because their timestamps could not be parsed.")
+        print("Please check the format of the 'timestamp' column in your input CSV:", csv_path)
+        return
+
     df['utc'] = df['timestamp'].dt.tz_convert('UTC')
 
     # Moon sign / nakshatra / house
@@ -165,11 +211,34 @@ def enrich(csv_path: Path, out_path: Path):
 
 # ── CLI glue ──────────────────────────────────────────────────────
 def locate_csv():
-    root = Path(os.getenv('QQQ_DATA_DIR','./mnt/data'))
-    cands=[p for p in root.glob('**/*.csv') if 'qqq' in p.name.lower()]
-    if not cands:
-        raise FileNotFoundError(f'No QQQ CSV found in {root}')
-    return cands[0]
+    root = Path(os.getenv('QQQ_DATA_DIR', './mnt/data'))
+    all_csvs = list(root.glob('**/*.csv'))
+
+    if not all_csvs:
+        raise FileNotFoundError(f'No CSV files found in {root}')
+
+    # Priority 1: Exact match for QQQ.csv (case-insensitive)
+    exact_matches = [p for p in all_csvs if p.name.lower() == 'qqq.csv']
+    if exact_matches:
+        exact_matches.sort() # Ensure consistent pick if multiple (e.g. in subdirs)
+        return exact_matches[0]
+
+    # Priority 2: Files containing 'qqq' but not '_enriched'
+    qqq_originals = [p for p in all_csvs if 'qqq' in p.name.lower() and '_enriched' not in p.name.lower()]
+    if qqq_originals:
+        qqq_originals.sort()
+        return qqq_originals[0]
+
+    # Priority 3: Fallback to any file containing 'qqq' if no "original" is found
+    all_qqq_files = [p for p in all_csvs if 'qqq' in p.name.lower()]
+    if all_qqq_files:
+        all_qqq_files.sort()
+        selected_file = all_qqq_files[0]
+        if '_enriched' in selected_file.name.lower():
+            print(f"⚠️  Warning: No primary QQQ data file found. Using potentially enriched file: {selected_file}")
+        return selected_file
+
+    raise FileNotFoundError(f'No QQQ CSV files found in {root} matching criteria.')
 
 if __name__ == '__main__':
     import argparse, sys

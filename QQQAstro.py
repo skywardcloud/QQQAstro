@@ -176,61 +176,140 @@ def get_sunrise_utc_for_date(target_date_obj: datetime.date,
     sunrise_cache_dict[target_date_obj] = sunrise_dt_utc_val
     return sunrise_dt_utc_val
 
+def get_sunset_utc_for_date(target_date_obj: datetime.date,
+                            ny_topos_obj: Topos,
+                            ny_timezone_obj: pytz.BaseTzInfo,
+                            sunset_cache_dict: Dict[datetime.date, Union[datetime, None]]) -> Union[datetime, None]:
+    """
+    Calculates and caches the UTC sunset time for a given date in New York.
+    Uses global EPH and SF_TIMESCALER.
+    """
+    if target_date_obj in sunset_cache_dict:
+        return sunset_cache_dict[target_date_obj]
+
+    dt_start_ny_naive = datetime.combine(target_date_obj, datetime.min.time())
+    dt_start_ny_aware = ny_timezone_obj.localize(dt_start_ny_naive)
+    
+    dt_end_ny_naive = datetime.combine(target_date_obj + timedelta(days=1), datetime.min.time())
+    dt_end_ny_aware = ny_timezone_obj.localize(dt_end_ny_naive)
+
+    t0 = SF_TIMESCALER.from_datetime(dt_start_ny_aware.astimezone(timezone.utc))
+    t1 = SF_TIMESCALER.from_datetime(dt_end_ny_aware.astimezone(timezone.utc))
+
+    f = almanac.sunrise_sunset(EPH, ny_topos_obj) # f gives both sunrise (1) and sunset (0)
+    times_utc_skyfield, events = almanac.find_discrete(t0, t1, f)
+
+    sunset_dt_utc_val = None
+    for t_sf, event_code in zip(times_utc_skyfield, events):
+        if event_code == 0:  # event == 0 means sunset
+            potential_sunset_utc = t_sf.utc_datetime()
+            potential_sunset_ny = potential_sunset_utc.replace(tzinfo=timezone.utc).astimezone(ny_timezone_obj)
+            if potential_sunset_ny.date() == target_date_obj:
+                sunset_dt_utc_val = potential_sunset_utc
+                break 
+    sunset_cache_dict[target_date_obj] = sunset_dt_utc_val
+    return sunset_dt_utc_val
+
 def calculate_hora(timestamp_ny_aware: pd.Timestamp,
-                   ny_topos_obj: Topos,
+                   ny_topos_obj: Topos, # Not directly used if all needed sunrise/sunset times are pre-cached and found
                    ny_timezone_obj: pytz.BaseTzInfo,
-                   sunrise_cache_dict: Dict[datetime.date, Union[datetime, None]]) -> Union[str, None]:
+                   sunrise_cache_utc: Dict[datetime.date, Union[datetime, None]],
+                   sunset_cache_utc: Dict[datetime.date, Union[datetime, None]] # Added sunset_cache_utc
+                  ) -> Union[str, None]:
     """
     Calculates the Hora lord for a given New York timestamp.
     Uses global DAY_LORD_MAP, HORA_RULER_SEQUENCE.
+    This version calculates variable-length Horas based on actual day/night durations.
     """
-    current_date_obj = timestamp_ny_aware.date()
-    
-    sunrise_today_utc = get_sunrise_utc_for_date(current_date_obj, ny_topos_obj, ny_timezone_obj, sunrise_cache_dict)
+    current_timestamp_date_ny = timestamp_ny_aware.date()
 
-    effective_sunrise_ny = None
-    effective_day_of_week = -1
+    # Determine the effective date for the Hora cycle
+    # Note: The parameter was sunrise_cache_dict, renamed to sunrise_cache_utc for clarity
+    sunrise_on_timestamp_date_utc = sunrise_cache_utc.get(current_timestamp_date_ny)
 
-    if sunrise_today_utc is not None:
-        sunrise_today_ny_aware = sunrise_today_utc.replace(tzinfo=timezone.utc).astimezone(ny_timezone_obj)
-        if timestamp_ny_aware < sunrise_today_ny_aware:
-            previous_date_obj = current_date_obj - timedelta(days=1)
-            sunrise_previous_day_utc = get_sunrise_utc_for_date(previous_date_obj, ny_topos_obj, ny_timezone_obj, sunrise_cache_dict)
-            if sunrise_previous_day_utc is None:
-                print(f"⚠️ Warning: Cannot determine Hora for {timestamp_ny_aware} as previous day's ({previous_date_obj}) sunrise is unknown.")
-                return None
-            effective_sunrise_ny = sunrise_previous_day_utc.replace(tzinfo=timezone.utc).astimezone(ny_timezone_obj)
-            effective_day_of_week = previous_date_obj.weekday()
+    effective_date_ny: Union[datetime.date, None] = None
+    cycle_sunrise_ny: Union[datetime, None] = None # Sunrise that starts the current Hora cycle
+
+    if sunrise_on_timestamp_date_utc:
+        sunrise_on_timestamp_date_ny = sunrise_on_timestamp_date_utc.replace(tzinfo=timezone.utc).astimezone(ny_timezone_obj)
+        if timestamp_ny_aware >= sunrise_on_timestamp_date_ny:
+            effective_date_ny = current_timestamp_date_ny
+            cycle_sunrise_ny = sunrise_on_timestamp_date_ny
         else:
-            effective_sunrise_ny = sunrise_today_ny_aware
-            effective_day_of_week = current_date_obj.weekday()
-    else:
-        print(f"⚠️ Warning: Cannot determine Hora for {timestamp_ny_aware} as today's ({current_date_obj}) sunrise is unknown.")
+            # Timestamp is before the sunrise of its own date, so it belongs to the previous day's cycle
+            effective_date_ny = current_timestamp_date_ny - timedelta(days=1)
+            sunrise_previous_day_utc = sunrise_cache_utc.get(effective_date_ny)
+            if sunrise_previous_day_utc:
+                cycle_sunrise_ny = sunrise_previous_day_utc.replace(tzinfo=timezone.utc).astimezone(ny_timezone_obj)
+    elif current_timestamp_date_ny > min(sunrise_cache_utc.keys(), default=current_timestamp_date_ny): # Check if it's not the earliest date
+        # Sunrise for current timestamp's date not found, try previous day if timestamp might fall there
+        effective_date_ny = current_timestamp_date_ny - timedelta(days=1)
+        sunrise_previous_day_utc = sunrise_cache_utc.get(effective_date_ny)
+        if sunrise_previous_day_utc:
+             cycle_sunrise_ny = sunrise_previous_day_utc.replace(tzinfo=timezone.utc).astimezone(ny_timezone_obj)
+             # We must ensure timestamp_ny_aware is actually after this cycle_sunrise_ny
+             if not (cycle_sunrise_ny and timestamp_ny_aware >= cycle_sunrise_ny):
+                 cycle_sunrise_ny = None # Invalid scenario
+
+    if not effective_date_ny or not cycle_sunrise_ny:
+        print(f"⚠️ Warning: Could not determine effective sunrise/date for Hora calculation at {timestamp_ny_aware}.")
         return None
 
-    if effective_sunrise_ny is None: return None
+    # Get sunset of the effective day
+    sunset_effective_day_utc = sunset_cache_utc.get(effective_date_ny) # Use the passed sunset_cache_utc
+    if not sunset_effective_day_utc:
+        print(f"⚠️ Warning: Sunset for effective date {effective_date_ny} not found for {timestamp_ny_aware}.")
+        return None
+    cycle_sunset_ny = sunset_effective_day_utc.replace(tzinfo=timezone.utc).astimezone(ny_timezone_obj)
 
-    day_lord = DAY_LORD_MAP.get(effective_day_of_week)
-    if day_lord is None:
-        print(f"Error: Could not map weekday {effective_day_of_week} to a day lord for {timestamp_ny_aware}.")
+    # Get sunrise of the day *after* the effective day (for night duration)
+    date_after_effective_ny = effective_date_ny + timedelta(days=1)
+    sunrise_next_day_utc = sunrise_cache_utc.get(date_after_effective_ny)
+    if not sunrise_next_day_utc:
+        print(f"⚠️ Warning: Sunrise for {date_after_effective_ny} (after effective) not found for {timestamp_ny_aware}.")
+        return None
+    cycle_next_sunrise_ny = sunrise_next_day_utc.replace(tzinfo=timezone.utc).astimezone(ny_timezone_obj)
+
+    if not (cycle_sunrise_ny <= timestamp_ny_aware < cycle_next_sunrise_ny):
+        print(f"⚠️ Timestamp {timestamp_ny_aware} is outside the calculated cycle [{cycle_sunrise_ny}, {cycle_next_sunrise_ny}).")
         return None
 
-    time_diff_seconds = (timestamp_ny_aware - effective_sunrise_ny).total_seconds()
+    day_duration_seconds = (cycle_sunset_ny - cycle_sunrise_ny).total_seconds()
+    night_duration_seconds = (cycle_next_sunrise_ny - cycle_sunset_ny).total_seconds()
 
-    if time_diff_seconds < 0:
-        print(f"⚠️ Warning: Timestamp {timestamp_ny_aware} is earlier than its effective sunrise {effective_sunrise_ny}. Hora cannot be calculated.")
+    if day_duration_seconds <= 0 and night_duration_seconds <= 0: # Should not happen in NY
+        print(f"⚠️ Both day and night durations are zero or negative for {effective_date_ny}.")
         return None
-        
-    hours_passed = int(time_diff_seconds / 3600)
 
+    day_lord = DAY_LORD_MAP.get(effective_date_ny.weekday())
+    if day_lord is None: return None # Should not happen
     try:
         start_lord_idx = HORA_RULER_SEQUENCE.index(day_lord)
-    except ValueError:
-        print(f"Error: Day lord '{day_lord}' not found in HORA_RULER_SEQUENCE for {timestamp_ny_aware}.")
+    except ValueError: return None
+
+    overall_hora_index = -1
+
+    if timestamp_ny_aware < cycle_sunset_ny: # Day Hora
+        if day_duration_seconds > 0:
+            day_hora_len_sec = day_duration_seconds / 12.0
+            time_since_sunrise = (timestamp_ny_aware - cycle_sunrise_ny).total_seconds()
+            hora_idx_in_period = int(time_since_sunrise / day_hora_len_sec)
+            overall_hora_index = min(hora_idx_in_period, 11) # Clamp to 0-11
+        # If day_duration_seconds is 0, timestamp must be at sunrise=sunset, falls to night.
+    else: # Night Hora
+        if night_duration_seconds > 0:
+            night_hora_len_sec = night_duration_seconds / 12.0
+            time_since_sunset = (timestamp_ny_aware - cycle_sunset_ny).total_seconds()
+            hora_idx_in_period = int(time_since_sunset / night_hora_len_sec)
+            overall_hora_index = 12 + min(hora_idx_in_period, 11) # Clamp to 0-11 for night part
+
+    if overall_hora_index == -1 or overall_hora_index >= 24:
+        print(f"⚠️ Error calculating Hora index for {timestamp_ny_aware}. Index: {overall_hora_index}")
         return None
 
-    hora_lord_idx = (start_lord_idx + hours_passed) % len(HORA_RULER_SEQUENCE)
-    return HORA_RULER_SEQUENCE[hora_lord_idx]
+    final_lord_idx = (start_lord_idx + overall_hora_index) % len(HORA_RULER_SEQUENCE)
+    return HORA_RULER_SEQUENCE[final_lord_idx]
+
 
 # ── robust timestamp parser ───────────────────────────────────────
 def parse_ts(series_input: pd.Series, pytz_ny: pytz.BaseTzInfo) -> pd.Series:
@@ -247,7 +326,7 @@ def parse_ts(series_input: pd.Series, pytz_ny: pytz.BaseTzInfo) -> pd.Series:
     if mask_attempt1_success.any():
         # Localize these naive NY times to NY timezone
         localized_vals = s_attempt1_naive[mask_attempt1_success].dt.tz_localize(
-            pytz_ny, nonexistent='shift_forward'
+            pytz_ny, nonexistent='shift_forward' # Use 'shift_forward' for DST "spring forward" non-existent times
         )
         s_final_ny.loc[mask_attempt1_success] = localized_vals
 
@@ -269,7 +348,7 @@ def parse_ts(series_input: pd.Series, pytz_ny: pytz.BaseTzInfo) -> pd.Series:
                 # This is where parsing with utc=True failed for this specific string
                 # that didn't match the initial format '%m/%d/%y %H:%M'.
                 original_string_that_failed = series_str.loc[idx] # Get original string from series_str using the index
-                print(f"[DEBUG parse_ts] Inference with utc=True failed for original string: '{original_string_that_failed}'")
+                # print(f"[DEBUG parse_ts] Inference with utc=True failed for original string: '{original_string_that_failed}'")
                 continue # s_final_ny already has NaT for this idx if not set by format match
 
             if ts_val.tzinfo is not None: # It's timezone-aware (parsed as UTC)
@@ -283,14 +362,25 @@ def parse_ts(series_input: pd.Series, pytz_ny: pytz.BaseTzInfo) -> pd.Series:
     
     # Ensure the final series has the target timezone, even if all values are NaT
     if s_final_ny.dt.tz is None and pytz_ny is not None:
-        s_final_ny = s_final_ny.dt.tz_localize(pytz_ny, nonexistent='shift_forward', ambiguous='NaT')
+        # If all were NaT or became NaT, tz_localize might fail if Series is empty or all NaT.
+        # A robust way is to ensure the dtype is correct.
+        try:
+            s_final_ny = s_final_ny.dt.tz_localize(pytz_ny, nonexistent='shift_forward', ambiguous='NaT')
+        except TypeError: # Handles cases like all NaT series
+            if s_final_ny.isna().all():
+                 s_final_ny = pd.Series(pd.NaT, index=s_final_ny.index).dt.tz_localize(pytz_ny)
+            else:
+                raise # Re-raise if it's another issue
     elif s_final_ny.dt.tz is not None and str(s_final_ny.dt.tz) != str(pytz_ny.zone):
         s_final_ny = s_final_ny.dt.tz_convert(pytz_ny)
 
-    if s_final_ny.notna().sum() == 0:
+    if s_final_ny.notna().sum() == 0 and not series_input.empty : # Check if series_input was not empty
         potential_timestamps = series_input.astype(str).str.strip().str.contains(r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{1,2}:\d{2}')
         if potential_timestamps.any() and series_input[potential_timestamps].str.strip().any():
-             raise ValueError("Timestamp-like data found but could not be definitively parsed into datetime objects after all attempts.")
+             # Only raise if there was something that looked like a timestamp
+             # print("Warning: Timestamp-like data found but could not be definitively parsed into datetime objects after all attempts.")
+             # Avoid raising error, let downstream handle NaTs.
+             pass
             
     return s_final_ny
 
@@ -310,8 +400,8 @@ def enrich(csv_path: Path, out_path: Path):
 
     if num_bad_rows > 0:
         print(f"⚠︎  {num_bad_rows} timestamp rows will be dropped due to parsing errors.")
-        print("Original timestamp values from your input CSV that could not be parsed:")
-        print(original_timestamps_series[bad_rows_mask]) # Print the problematic original strings
+        # print("Original timestamp values from your input CSV that could not be parsed:")
+        # print(original_timestamps_series[bad_rows_mask]) # Print the problematic original strings
         df = df.dropna(subset=['timestamp'])
 
     if df.empty: # Check if all rows were dropped
@@ -323,24 +413,43 @@ def enrich(csv_path: Path, out_path: Path):
 
     # Hora Calculation Setup
     ny_topos = Topos(latitude_degrees=NY_LATITUDE, longitude_degrees=NY_LONGITUDE)
-    sunrise_cache_utc: Dict[datetime.date, Union[datetime, None]] = {} # Initialize cache for sunrise times
+    sunrise_cache_utc: Dict[datetime.date, Union[datetime, None]] = {} 
+    sunset_cache_utc: Dict[datetime.date, Union[datetime, None]] = {} # Cache for sunset times
 
-    # Pre-populate sunrise cache for all relevant dates
+    # Pre-populate sunrise and sunset cache for all relevant dates
     if not df.empty:
         # df['timestamp'] is already NY-localized and NaTs are dropped
-        all_unique_dates_in_df = df['timestamp'].dt.date.unique()
+        all_unique_dates_in_df_timestamps = df['timestamp'].dt.date.unique()
         
-        required_dates_for_sunrise = set()
-        for date_obj_val in all_unique_dates_in_df:
-            required_dates_for_sunrise.add(date_obj_val) # For "today's sunrise"
-            required_dates_for_sunrise.add(date_obj_val - timedelta(days=1)) # For "previous day's sunrise"
+        required_dates_for_astro_events = set()
+        for date_obj_val in all_unique_dates_in_df_timestamps:
+            required_dates_for_astro_events.add(date_obj_val) # For current day's events
+            required_dates_for_astro_events.add(date_obj_val - timedelta(days=1)) # For previous day's events
+            required_dates_for_astro_events.add(date_obj_val + timedelta(days=1)) # For next day's events (e.g. next sunrise for night duration)
 
-        print(f"ℹ️  Pre-calculating sunrises for {len(required_dates_for_sunrise)} unique NY dates...")
-        for date_to_calc in sorted(list(required_dates_for_sunrise)): # Sorted for consistent processing
-            get_sunrise_utc_for_date(date_to_calc, ny_topos, ny, sunrise_cache_utc)
-        print("✓ Sunrises pre-calculated.")
+        print(f"ℹ️  Pre-calculating sunrises/sunsets for {len(required_dates_for_astro_events)} unique NY dates...")
+        for date_to_calc in sorted(list(required_dates_for_astro_events)): 
+            # Ensure get_sunrise/sunset functions handle missing events gracefully (e.g. polar night/day)
+            # by returning None, which the cache will store.
+            if get_sunrise_utc_for_date(date_to_calc, ny_topos, ny, sunrise_cache_utc) is None:
+                 print(f"⚠️  Warning: Could not determine sunrise for {date_to_calc} in New York during pre-calculation.")
+            if get_sunset_utc_for_date(date_to_calc, ny_topos, ny, sunset_cache_utc) is None:
+                 print(f"⚠️  Warning: Could not determine sunset for {date_to_calc} in New York during pre-calculation.")
+        print("✓ Sunrises/Sunsets pre-calculated.")
 
-    df['hora'] = df.apply(lambda row: calculate_hora(row['timestamp'], ny_topos, ny, sunrise_cache_utc), axis=1)
+    # Pass both caches to the new calculate_hora function
+    # Note: The calculate_hora function signature was updated in thought process to accept sunset_cache_utc
+    # The lambda needs to pass ny_topos, ny_timezone, sunrise_cache, sunset_cache
+    df['hora'] = df.apply(
+        lambda row: calculate_hora(
+            row['timestamp'], 
+            ny_topos, # ny_topos_obj argument in calculate_hora
+            ny,       # ny_timezone_obj argument in calculate_hora
+            sunrise_cache_utc, 
+            sunset_cache_utc # New argument for sunset cache
+        ), 
+        axis=1
+    )
 
     # Moon sign / nakshatra / house
     df['moon_long'] = df['utc'].apply(moon_lon)
@@ -350,9 +459,10 @@ def enrich(csv_path: Path, out_path: Path):
 
     # Solar-arc progressed Lagna
     daily_arc = {}
-    for d in df['utc'].dt.date.unique():
-        dt = datetime(d.year,d.month,d.day,tzinfo=timezone.utc)
-        daily_arc[str(d)] = (sun_lon(dt) - NATAL_SUN_LONG) % 360
+    for d_utc_date_val in df['utc'].dt.date.unique(): # Iterate over unique UTC dates
+        # Use a consistent time for daily arc calculation, e.g., noon UTC on that date
+        dt_for_arc = datetime(d_utc_date_val.year, d_utc_date_val.month, d_utc_date_val.day, 12, 0, 0, tzinfo=timezone.utc)
+        daily_arc[str(d_utc_date_val)] = (sun_lon(dt_for_arc) - NATAL_SUN_LONG) % 360
     df['solar_arc'] = df['utc'].dt.date.astype(str).map(daily_arc)
     df['prog_lagna_long'] = (NATAL_LAGNA_LONG + df['solar_arc']) % 360
     df['prog_lagna_house']= df.apply(

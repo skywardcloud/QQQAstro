@@ -11,6 +11,9 @@ Adds to every 5-min QQQ bar:
     Mars, Jupiter, Saturn, Uranus, Neptune, Pluto
     (Planetary longitudes calculated using Skyfield and JPL DE441 ephemeris)
   • Hora (planetary hour lord) for New York time
+  • Transitory Lagna (Ascendant) longitude, sign, nakshatra, house (Chalit-Taurus)
+  • Lagna house change flag (5-min interval)
+  • Moon house change flag (5-min interval)
   • any_cusp_cross = OR of all planet flags
 
 Run:
@@ -121,17 +124,43 @@ PLANET_FUNCS = {
     'neptune': neptune_lon, 'pluto': pluto_lon,
 }
 
+# ── Lagna (Ascendant) Calculation ─────────────────────────────────
+def calculate_lagna_longitude(dt_utc: datetime, observer_topos: Topos) -> Union[float, type(pd.NA)]:
+    """
+    Calculates the sidereal longitude of the Ascendant (Lagna) for a given
+    UTC datetime and observer geographic location (Topos object).
+    Uses global SF_TIMESCALER, SF_EARTH, ecliptic_frame, AYANAMSA.
+    Returns pd.NA if input dt_utc is NA.
+    """
+    if pd.isna(dt_utc):
+        return pd.NA
+
+    t = SF_TIMESCALER.from_datetime(dt_utc)
+    observer_at_time = (SF_EARTH + observer_topos).at(t)
+
+    # Determine the ICRS coordinates of the point on the eastern horizon
+    # (Altitude 0 degrees, Azimuth 90 degrees)
+    eastern_horizon_point_icrs = observer_at_time.from_altaz(alt_degrees=0, az_degrees=90)
+
+    # Convert these ICRS coordinates to ecliptic coordinates of date.
+    # ecliptic_frame is J2000.0 mean ecliptic.
+    # The epoch=t argument ensures the coordinates are for the true ecliptic and equinox of date.
+    _ecl_lat, ecl_lon_tropical_of_date, _dist = eastern_horizon_point_icrs.ecliptic_latlon(epoch=t)
+    
+    tropical_lon_degrees = ecl_lon_tropical_of_date.degrees
+    sidereal_lon_degrees = (tropical_lon_degrees - AYANAMSA) % 360
+    return sidereal_lon_degrees
+
 # ── zodiac helpers ────────────────────────────────────────────────
-def sign_from_lon(lon):       return SIGNS[int(lon // 30)]
-def nakshatra_from_lon(lon):  return NAKSHATRAS[int(((lon-AYANAMSA)%360)//(360/27))]
-def house_from_lon(lon):      return int(((lon - NATAL_LAGNA_LONG) % 360) // 30) + 1
-def ang_diff(a,b):            return abs((a-b+180)%360 - 180)
+def sign_from_lon(lon: float) -> Union[str, type(pd.NA)]: return SIGNS[int(lon // 30)] if pd.notna(lon) else pd.NA
+def nakshatra_from_lon(lon: float) -> Union[str, type(pd.NA)]: return NAKSHATRAS[int(((lon-AYANAMSA)%360)//(360/27))] if pd.notna(lon) else pd.NA
+def house_from_lon(lon: float) -> Union[int, type(pd.NA)]: return int(((lon - NATAL_LAGNA_LONG) % 360) // 30) + 1 if pd.notna(lon) else pd.NA
+def ang_diff(a: float, b: float) -> Union[float, type(pd.NA)]: return abs((a-b+180)%360 - 180) if pd.notna(a) and pd.notna(b) else pd.NA
 
 # House cusps (0 = Lagna, 30 = 2nd, …)
 CUSPS = [(NATAL_LAGNA_LONG + 30*i) % 360 for i in range(12)]
 CUSP_TOL = 0.5  # deg
-
-def near_cusp(lon): return any(ang_diff(lon,c) <= CUSP_TOL for c in CUSPS)
+def near_cusp(lon: float) -> bool: return any(ang_diff(lon,c) <= CUSP_TOL for c in CUSPS) if pd.notna(lon) else False
 
 # ── Hora Calculation Helpers ──────────────────────────────────────
 
@@ -451,12 +480,31 @@ def enrich(csv_path: Path, out_path: Path):
         axis=1
     )
 
+    # Transitory Lagna (Ascendant) calculations
+    print("ℹ️  Calculating transitory Lagna, sign, nakshatra, and house...")
+    df['lagna_long'] = df['utc'].apply(
+        lambda dt_val: calculate_lagna_longitude(dt_val, ny_topos)
+    )
+    df['lagna_long'] = pd.to_numeric(df['lagna_long'], errors='coerce')
+
+    df['lagna_sign'] = df['lagna_long'].apply(sign_from_lon)
+    df['lagna_nakshatra'] = df['lagna_long'].apply(nakshatra_from_lon)
+    df['lagna_house'] = df['lagna_long'].apply(house_from_lon).astype(pd.Int64Dtype())
+
     # Moon sign / nakshatra / house
     df['moon_long'] = df['utc'].apply(moon_lon)
     df['moon_sign'] = df['moon_long'].apply(sign_from_lon)
     df['nakshatra'] = df['moon_long'].apply(nakshatra_from_lon)
-    df['moon_house'] = df['moon_long'].apply(house_from_lon)
+    df['moon_house'] = df['moon_long'].apply(house_from_lon).astype(pd.Int64Dtype())
 
+    # Lagna and Moon House Change Flags (5-min interval)
+    print("ℹ️  Calculating Lagna and Moon house change flags...")
+    df['lagna_house_change_5m'] = (df['lagna_house'] != df['lagna_house'].shift(1)).fillna(False).astype(bool)
+    df['moon_house_change_5m'] = (df['moon_house'] != df['moon_house'].shift(1)).fillna(False).astype(bool)
+    
+    # Ensure 'hora_lord' (already calculated) and 'mercury_cusp_cross' (will be calculated later) are present
+    # The user request implies these are key outputs alongside the new ones.
+    
     # Solar-arc progressed Lagna
     daily_arc = {}
     for d_utc_date_val in df['utc'].dt.date.unique(): # Iterate over unique UTC dates

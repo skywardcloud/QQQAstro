@@ -153,7 +153,20 @@ def calculate_lagna_longitude(dt_utc: datetime, observer_topos: Topos) -> Union[
 
 # ── zodiac helpers ────────────────────────────────────────────────
 def sign_from_lon(lon: float) -> Union[str, type(pd.NA)]: return SIGNS[int(lon // 30)] if pd.notna(lon) else pd.NA
-def nakshatra_from_lon(lon: float) -> Union[str, type(pd.NA)]: return NAKSHATRAS[int(((lon-AYANAMSA)%360)//(360/27))] if pd.notna(lon) else pd.NA
+def nakshatra_from_lon(lon: float) -> Union[str, type(pd.NA)]:
+    """Return nakshatra name for a tropical longitude."""
+    if pd.notna(lon):
+        idx = int(((lon - AYANAMSA) % 360) // (360 / 27))
+        return NAKSHATRAS[idx]
+    return pd.NA
+
+# New helper for sidereal longitudes (no ayanamsha offset)
+def nakshatra_from_sidereal_lon(lon: float) -> Union[str, type(pd.NA)]:
+    """Return nakshatra name for a sidereal longitude."""
+    if pd.notna(lon):
+        idx = int((lon % 360) // (360 / 27))
+        return NAKSHATRAS[idx]
+    return pd.NA
 def house_from_lon(lon: float) -> Union[int, type(pd.NA)]: return int(((lon - NATAL_LAGNA_LONG) % 360) // 30) + 1 if pd.notna(lon) else pd.NA
 def ang_diff(a: float, b: float) -> Union[float, type(pd.NA)]: return abs((a-b+180)%360 - 180) if pd.notna(a) and pd.notna(b) else pd.NA
 
@@ -488,7 +501,7 @@ def enrich(csv_path: Path, out_path: Path):
     df['lagna_long'] = pd.to_numeric(df['lagna_long'], errors='coerce')
 
     df['lagna_sign'] = df['lagna_long'].apply(sign_from_lon)
-    df['lagna_nakshatra'] = df['lagna_long'].apply(nakshatra_from_lon)
+    df['lagna_nakshatra'] = df['lagna_long'].apply(nakshatra_from_sidereal_lon)
     df['lagna_house'] = df['lagna_long'].apply(house_from_lon).astype(pd.Int64Dtype())
 
     # Moon sign / nakshatra / house

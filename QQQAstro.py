@@ -495,7 +495,9 @@ def enrich(csv_path: Path, out_path: Path):
     df['moon_long'] = df['utc'].apply(moon_lon)
     df['moon_sign'] = df['moon_long'].apply(sign_from_lon)
     df['nakshatra'] = df['moon_long'].apply(nakshatra_from_lon)
-    df['moon_house'] = df['moon_long'].apply(house_from_lon).astype(pd.Int64Dtype())
+    df['moon_house'] = df['moon_long'].apply(
+        lambda lon: house_from_lon((lon - AYANAMSA) % 360)
+    ).astype(pd.Int64Dtype())
 
     # Lagna and Moon House Change Flags (5-min interval)
     print("ℹ️  Calculating Lagna and Moon house change flags...")
@@ -514,7 +516,9 @@ def enrich(csv_path: Path, out_path: Path):
     df['solar_arc'] = df['utc'].dt.date.astype(str).map(daily_arc)
     df['prog_lagna_long'] = (NATAL_LAGNA_LONG + df['solar_arc']) % 360
     df['prog_lagna_house']= df.apply(
-        lambda r: house_from_lon(r['moon_long']-r['solar_arc']), axis=1)
+        lambda r: house_from_lon(((r['moon_long'] - r['solar_arc']) - AYANAMSA) % 360),
+        axis=1
+    )
 
     # Lunar return flag
     df['lunar_return'] = df['moon_long'].apply(
@@ -532,7 +536,9 @@ def enrich(csv_path: Path, out_path: Path):
         col_long = f"{name}_long"
         col_flag = f"{name}_cusp_cross"
         df[col_long] = df['utc'].apply(func)
-        df[col_flag] = df[col_long].apply(near_cusp)
+        df[col_flag] = df[col_long].apply(
+            lambda lon: near_cusp((lon - AYANAMSA) % 360)
+        )
 
     cusp_cols = [c for c in df.columns if c.endswith('_cusp_cross')]
     df['any_cusp_cross'] = df[cusp_cols].any(axis=1)

@@ -501,9 +501,7 @@ def enrich(csv_path: Path, out_path: Path):
 
     # Transitory Lagna (Ascendant) calculations
     print("ℹ️  Calculating transitory Lagna, sign, nakshatra, and house...")
-    df['lagna_long'] = df['utc'].apply(
-        lambda dt_val: calculate_lagna_longitude(dt_val)
-    )
+    df['lagna_long'] = df['utc'].apply(calculate_lagna_longitude)
     df['lagna_long'] = pd.to_numeric(df['lagna_long'], errors='coerce')
 
     # Longitude already sidereal – just lookup the sign directly

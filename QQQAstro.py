@@ -78,6 +78,9 @@ HORA_RULER_SEQUENCE = ["Sun", "Venus", "Mercury", "Moon", "Saturn", "Jupiter", "
 # to Skyfield's default cache directory on first run if not already present.
 EPH = skyfield_load('de441.bsp')
 
+# Configure Swiss Ephemeris to use same ayanamsha for sidereal calculations
+swe.set_sid_mode(swe.SIDM_USER, AYANAMSA, 0)
+
 SF_EARTH = EPH['earth']
 SF_PLANET_MAPPING = {
     'sun': EPH['sun'],
@@ -92,6 +95,32 @@ SF_PLANET_MAPPING = {
     'pluto': EPH['pluto barycenter'],
 }
 SF_TIMESCALER = skyfield_load.timescale()
+
+# Mapping for Swiss Ephemeris planet IDs
+SWE_PLANET_IDS = {
+    'sun': swe.SUN,
+    'moon': swe.MOON,
+    'mercury': swe.MERCURY,
+    'venus': swe.VENUS,
+    'mars': swe.MARS,
+    'jupiter': swe.JUPITER,
+    'saturn': swe.SATURN,
+    'uranus': swe.URANUS,
+    'neptune': swe.NEPTUNE,
+    'pluto': swe.PLUTO,
+}
+
+def swe_sidereal_longitude(planet_name: str, dt_utc: datetime) -> float:
+    """Sidereal longitude of planet using Swiss Ephemeris."""
+    pid = SWE_PLANET_IDS[planet_name]
+    jd = swe.julday(
+        dt_utc.year,
+        dt_utc.month,
+        dt_utc.day,
+        dt_utc.hour + dt_utc.minute / 60 + dt_utc.second / 3600,
+    )
+    lon, _lat, _dist = swe.calc_ut(jd, pid, swe.FLG_SWIEPH | swe.FLG_SIDEREAL)
+    return lon % 360
 
 def _get_skyfield_longitude(planet_key: str, dt_utc: datetime) -> float:
     """Helper to get apparent geocentric ecliptic longitude from Skyfield."""
@@ -584,13 +613,17 @@ def enrich(csv_path: Path, out_path: Path):
         lambda r: ang_diff(r['rahu_long'],NATAL_LAGNA_LONG)<=2 or
                   ang_diff(r['ketu_long'],NATAL_LAGNA_LONG)<=2, axis=1)
 
-    # Planet cusp-cross flags
+    # Planet cusp-cross flags and Swiss Ephemeris sign/nakshatra
     for name,func in PLANET_FUNCS.items():
         col_long = f"{name}_long"
         col_flag = f"{name}_cusp_cross"
         df[col_long] = df['utc'].apply(func)
 
         df[col_flag] = df[col_long].apply(near_cusp)
+
+        swe_lons = df['utc'].apply(lambda dt: swe_sidereal_longitude(name, dt))
+        df[f"{name}_sign"] = swe_lons.apply(sign_from_lon)
+        df[f"{name}_nakshatra"] = swe_lons.apply(nakshatra_from_sidereal_lon)
 
     cusp_cols = [c for c in df.columns if c.endswith('_cusp_cross')]
     df['any_cusp_cross'] = df[cusp_cols].any(axis=1)

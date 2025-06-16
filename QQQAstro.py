@@ -504,6 +504,7 @@ def enrich(csv_path: Path, out_path: Path):
     )
     df['lagna_long'] = pd.to_numeric(df['lagna_long'], errors='coerce')
 
+    # Longitude already sidereal – just lookup the sign directly
     df['lagna_sign'] = df['lagna_long'].apply(sign_from_lon)
     df['lagna_nakshatra'] = df['lagna_long'].apply(nakshatra_from_sidereal_lon)
     df['lagna_house'] = df['lagna_long'].apply(house_from_lon).astype(pd.Int64Dtype())

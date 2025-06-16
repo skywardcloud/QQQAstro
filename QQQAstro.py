@@ -10,7 +10,9 @@ Adds to every 5-min QQQ bar:
   • Cusp-cross flags for Sun, Moon, Mercury, Venus,
     Mars, Jupiter, Saturn, Uranus, Neptune, Pluto
     (Planetary longitudes now computed in sidereal coordinates
-     using Skyfield and JPL DE441 ephemeris)
+     using Skyfield and JPL DE441 ephemeris; Sun and Moon
+     longitudes now come from the Swiss Ephemeris with
+     ayanamsha subtraction)
   • Hora (planetary hour lord) for New York time
   • Transitory Lagna (Ascendant) longitude, sign, nakshatra, house (Chalit-Taurus)
   • Lagna house change flag (5-min interval)
@@ -144,12 +146,12 @@ def _sidereal_lon(tropical_lon: float) -> float:
 
 # ── High-Precision Planetary Longitudes ───────────────────────────
 def sun_lon(dt_utc: datetime) -> float:
-    """Sidereal longitude of the Sun."""
-    return _sidereal_lon(_get_skyfield_longitude('sun', dt_utc))
+    """Sidereal longitude of the Sun using Swiss Ephemeris."""
+    return swe_sidereal_longitude('sun', dt_utc)
 
 def moon_lon(dt_utc: datetime) -> float:
-    """Sidereal longitude of the Moon."""
-    return _sidereal_lon(_get_skyfield_longitude('moon', dt_utc))
+    """Sidereal longitude of the Moon using Swiss Ephemeris."""
+    return swe_sidereal_longitude('moon', dt_utc)
 
 def mercury_lon(dt_utc: datetime) -> float:
     """Sidereal longitude of Mercury."""

@@ -9,7 +9,8 @@ Adds to every 5-min QQQ bar:
   • Rahu/Ketu ± 2 ° Lagna-hit flag
   • Cusp-cross flags for Sun, Moon, Mercury, Venus,
     Mars, Jupiter, Saturn, Uranus, Neptune, Pluto
-    (Planetary longitudes calculated using Skyfield and JPL DE441 ephemeris)
+    (Planetary longitudes now computed in sidereal coordinates
+     using Skyfield and JPL DE441 ephemeris)
   • Hora (planetary hour lord) for New York time
   • Transitory Lagna (Ascendant) longitude, sign, nakshatra, house (Chalit-Taurus)
   • Lagna house change flag (5-min interval)
@@ -97,25 +98,61 @@ def _get_skyfield_longitude(planet_key: str, dt_utc: datetime) -> float:
     skyfield_body = SF_PLANET_MAPPING[planet_key]
     t = SF_TIMESCALER.from_datetime(dt_utc)
     astrometric = SF_EARTH.at(t).observe(skyfield_body)
-    # Apparent geocentric ecliptic longitude of date
+    # Apparent geocentric ecliptic longitude of date (tropical)
     _lat, lon, _dist = astrometric.apparent().ecliptic_latlon(epoch=t)
     return lon.degrees
 
-# ── High-Precision Planetary Longitudes ───────────────────────────
-def sun_lon(dt_utc: datetime) -> float:     return _get_skyfield_longitude('sun', dt_utc)
-def moon_lon(dt_utc: datetime) -> float:    return _get_skyfield_longitude('moon', dt_utc)
-def mercury_lon(dt_utc: datetime) -> float: return _get_skyfield_longitude('mercury', dt_utc)
-def venus_lon(dt_utc: datetime) -> float:   return _get_skyfield_longitude('venus', dt_utc)
-def mars_lon(dt_utc: datetime) -> float:    return _get_skyfield_longitude('mars', dt_utc)
-def jupiter_lon(dt_utc: datetime) -> float: return _get_skyfield_longitude('jupiter', dt_utc)
-def saturn_lon(dt_utc: datetime) -> float:  return _get_skyfield_longitude('saturn', dt_utc)
-def uranus_lon(dt_utc: datetime) -> float:  return _get_skyfield_longitude('uranus', dt_utc)
-def neptune_lon(dt_utc: datetime) -> float: return _get_skyfield_longitude('neptune', dt_utc)
-def pluto_lon(dt_utc: datetime) -> float:   return _get_skyfield_longitude('pluto', dt_utc)
+# Helper: convert a tropical longitude to sidereal using global AYANAMSA
+def _sidereal_lon(tropical_lon: float) -> float:
+    return (tropical_lon - AYANAMSA) % 360
 
-# Mean Rahu (North Node) - calculation remains the same
-def rahu_lon(dt):    return (125.04452 - 0.0529538083 *
-                             (dt - J2000).total_seconds()/86400) % 360
+# ── High-Precision Planetary Longitudes ───────────────────────────
+def sun_lon(dt_utc: datetime) -> float:
+    """Sidereal longitude of the Sun."""
+    return _sidereal_lon(_get_skyfield_longitude('sun', dt_utc))
+
+def moon_lon(dt_utc: datetime) -> float:
+    """Sidereal longitude of the Moon."""
+    return _sidereal_lon(_get_skyfield_longitude('moon', dt_utc))
+
+def mercury_lon(dt_utc: datetime) -> float:
+    """Sidereal longitude of Mercury."""
+    return _sidereal_lon(_get_skyfield_longitude('mercury', dt_utc))
+
+def venus_lon(dt_utc: datetime) -> float:
+    """Sidereal longitude of Venus."""
+    return _sidereal_lon(_get_skyfield_longitude('venus', dt_utc))
+
+def mars_lon(dt_utc: datetime) -> float:
+    """Sidereal longitude of Mars."""
+    return _sidereal_lon(_get_skyfield_longitude('mars', dt_utc))
+
+def jupiter_lon(dt_utc: datetime) -> float:
+    """Sidereal longitude of Jupiter."""
+    return _sidereal_lon(_get_skyfield_longitude('jupiter', dt_utc))
+
+def saturn_lon(dt_utc: datetime) -> float:
+    """Sidereal longitude of Saturn."""
+    return _sidereal_lon(_get_skyfield_longitude('saturn', dt_utc))
+
+def uranus_lon(dt_utc: datetime) -> float:
+    """Sidereal longitude of Uranus."""
+    return _sidereal_lon(_get_skyfield_longitude('uranus', dt_utc))
+
+def neptune_lon(dt_utc: datetime) -> float:
+    """Sidereal longitude of Neptune."""
+    return _sidereal_lon(_get_skyfield_longitude('neptune', dt_utc))
+
+def pluto_lon(dt_utc: datetime) -> float:
+    """Sidereal longitude of Pluto."""
+    return _sidereal_lon(_get_skyfield_longitude('pluto', dt_utc))
+
+# Mean Rahu (North Node) - converted to sidereal
+def rahu_lon(dt: datetime) -> float:
+    """Sidereal longitude of the lunar node (Rahu)."""
+    lon = (125.04452 - 0.0529538083 *
+           (dt - J2000).total_seconds() / 86400) % 360
+    return _sidereal_lon(lon)
 
 PLANET_FUNCS = {
     'sun': sun_lon, 'moon': moon_lon, 'mercury': mercury_lon,
@@ -511,11 +548,9 @@ def enrich(csv_path: Path, out_path: Path):
 
     # Moon sign / nakshatra / house
     df['moon_long'] = df['utc'].apply(moon_lon)
-    df['moon_sign'] = df['moon_long'].apply(lambda L: sign_from_lon(to_sidereal(L)))
-    df['nakshatra'] = df['moon_long'].apply(nakshatra_from_lon)
-    df['moon_house'] = df['moon_long'].apply(
-        lambda L: house_from_lon(to_sidereal(L))
-    ).astype(pd.Int64Dtype())
+    df['moon_sign'] = df['moon_long'].apply(sign_from_lon)
+    df['nakshatra'] = df['moon_long'].apply(nakshatra_from_sidereal_lon)
+    df['moon_house'] = df['moon_long'].apply(house_from_lon).astype(pd.Int64Dtype())
 
     # Lagna and Moon House Change Flags (5-min interval)
     print("ℹ️  Calculating Lagna and Moon house change flags...")
@@ -534,7 +569,7 @@ def enrich(csv_path: Path, out_path: Path):
     df['solar_arc'] = df['utc'].dt.date.astype(str).map(daily_arc)
     df['prog_lagna_long'] = (NATAL_LAGNA_LONG + df['solar_arc']) % 360
     df['prog_lagna_house'] = df.apply(
-        lambda r: house_from_lon(((r['moon_long'] - r['solar_arc']) - AYANAMSA) % 360),
+        lambda r: house_from_lon((r['moon_long'] - r['solar_arc']) % 360),
         axis=1
     )
 
@@ -555,7 +590,7 @@ def enrich(csv_path: Path, out_path: Path):
         col_flag = f"{name}_cusp_cross"
         df[col_long] = df['utc'].apply(func)
 
-        df[col_flag] = df[col_long].apply(lambda L: near_cusp(to_sidereal(L)))
+        df[col_flag] = df[col_long].apply(near_cusp)
 
     cusp_cols = [c for c in df.columns if c.endswith('_cusp_cross')]
     df['any_cusp_cross'] = df[cusp_cols].any(axis=1)

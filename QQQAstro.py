@@ -119,7 +119,8 @@ def swe_sidereal_longitude(planet_name: str, dt_utc: datetime) -> float:
         dt_utc.day,
         dt_utc.hour + dt_utc.minute / 60 + dt_utc.second / 3600,
     )
-    lon, _lat, _dist = swe.calc_ut(jd, pid, swe.FLG_SWIEPH | swe.FLG_SIDEREAL)
+    pos, _retflag = swe.calc_ut(jd, pid, swe.FLG_SWIEPH | swe.FLG_SIDEREAL)
+    lon = pos[0]
     return lon % 360
 
 def _get_skyfield_longitude(planet_key: str, dt_utc: datetime) -> float:

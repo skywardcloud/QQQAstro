@@ -1,6 +1,7 @@
 # QQQAstro
 
 QQQAstro enriches intraday QQQ CSV data with basic Vedic astrology markers.
+All planetary positions are computed in sidereal coordinates.
 
 ## Requirements
 - Python 3

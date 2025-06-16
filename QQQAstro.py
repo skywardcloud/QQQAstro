@@ -227,19 +227,16 @@ def to_sidereal(lon: float) -> Union[float, type(pd.NA)]:
 
 def sign_from_lon(lon: float) -> Union[str, type(pd.NA)]: return SIGNS[int(lon // 30)] if pd.notna(lon) else pd.NA
 def nakshatra_from_lon(lon: float) -> Union[str, type(pd.NA)]:
-    """Return nakshatra name for a tropical longitude."""
+    """Return nakshatra name for a **sidereal** longitude."""
     if pd.notna(lon):
-        idx = int(((lon - AYANAMSA) % 360) // (360 / 27))
+        idx = int((lon % 360) // (360 / 27))
         return NAKSHATRAS[idx]
     return pd.NA
 
 # New helper for sidereal longitudes (no ayanamsha offset)
 def nakshatra_from_sidereal_lon(lon: float) -> Union[str, type(pd.NA)]:
-    """Return nakshatra name for a sidereal longitude."""
-    if pd.notna(lon):
-        idx = int((lon % 360) // (360 / 27))
-        return NAKSHATRAS[idx]
-    return pd.NA
+    """Alias for :func:`nakshatra_from_lon` for backward compatibility."""
+    return nakshatra_from_lon(lon)
 def house_from_lon(lon: float) -> Union[int, type(pd.NA)]: return int(((lon - NATAL_LAGNA_LONG) % 360) // 30) + 1 if pd.notna(lon) else pd.NA
 def ang_diff(a: float, b: float) -> Union[float, type(pd.NA)]: return abs((a-b+180)%360 - 180) if pd.notna(a) and pd.notna(b) else pd.NA
 
@@ -573,13 +570,13 @@ def enrich(csv_path: Path, out_path: Path):
 
     # Longitude already sidereal – just lookup the sign directly
     df['lagna_sign'] = df['lagna_long'].apply(sign_from_lon)
-    df['lagna_nakshatra'] = df['lagna_long'].apply(nakshatra_from_sidereal_lon)
+    df['lagna_nakshatra'] = df['lagna_long'].apply(nakshatra_from_lon)
     df['lagna_house'] = df['lagna_long'].apply(house_from_lon).astype(pd.Int64Dtype())
 
     # Moon sign / nakshatra / house
     df['moon_long'] = df['utc'].apply(moon_lon)
     df['moon_sign'] = df['moon_long'].apply(sign_from_lon)
-    df['nakshatra'] = df['moon_long'].apply(nakshatra_from_sidereal_lon)
+    df['nakshatra'] = df['moon_long'].apply(nakshatra_from_lon)
     df['moon_house'] = df['moon_long'].apply(house_from_lon).astype(pd.Int64Dtype())
 
     # Lagna and Moon House Change Flags (5-min interval)
@@ -624,7 +621,7 @@ def enrich(csv_path: Path, out_path: Path):
 
         swe_lons = df['utc'].apply(lambda dt: swe_sidereal_longitude(name, dt))
         df[f"{name}_sign"] = swe_lons.apply(sign_from_lon)
-        df[f"{name}_nakshatra"] = swe_lons.apply(nakshatra_from_sidereal_lon)
+        df[f"{name}_nakshatra"] = swe_lons.apply(nakshatra_from_lon)
 
     cusp_cols = [c for c in df.columns if c.endswith('_cusp_cross')]
     df['any_cusp_cross'] = df[cusp_cols].any(axis=1)

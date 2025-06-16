@@ -125,7 +125,7 @@ PLANET_FUNCS = {
 }
 
 # ── Lagna (Ascendant) Calculation ─────────────────────────────────
-def calculate_lagna_longitude(dt_utc: datetime) -> float | pd.NA:
+def calculate_lagna_longitude(dt_utc: datetime) -> float | type(pd.NA):
     """
     Sidereal Ascendant longitude (Lahiri) for New-York at dt_utc.
     Uses Swiss-Ephem's house routine (Placidus).

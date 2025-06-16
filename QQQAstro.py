@@ -111,7 +111,11 @@ SWE_PLANET_IDS = {
 }
 
 def swe_sidereal_longitude(planet_name: str, dt_utc: datetime) -> float:
-    """Sidereal longitude of planet using Swiss Ephemeris."""
+    """Sidereal longitude of planet using Swiss Ephemeris.
+
+    The Swiss routine returns a **tropical** longitude, so we convert it to
+    sidereal by subtracting :data:`AYANAMSA` just like the Lagna calculation.
+    """
     pid = SWE_PLANET_IDS[planet_name]
     jd = swe.julday(
         dt_utc.year,
@@ -119,9 +123,11 @@ def swe_sidereal_longitude(planet_name: str, dt_utc: datetime) -> float:
         dt_utc.day,
         dt_utc.hour + dt_utc.minute / 60 + dt_utc.second / 3600,
     )
-    pos, _retflag = swe.calc_ut(jd, pid, swe.FLG_SWIEPH | swe.FLG_SIDEREAL)
+    # Get tropical longitude from Swiss Ephemeris
+    pos, _retflag = swe.calc_ut(jd, pid, swe.FLG_SWIEPH)
     lon = pos[0]
-    return lon % 360
+    # Convert to sidereal
+    return (lon - AYANAMSA) % 360
 
 def _get_skyfield_longitude(planet_key: str, dt_utc: datetime) -> float:
     """Helper to get apparent geocentric ecliptic longitude from Skyfield."""

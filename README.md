@@ -7,6 +7,7 @@ QQQAstro enriches intraday QQQ CSV data with basic Vedic astrology markers.
 - pandas
 - pytz
 - skyfield
+- swisseph
 
 ## Usage
 ```bash
@@ -27,5 +28,5 @@ Install dependencies with:
 ```bash
 pip install -r requirements.txt
 ```
-This will install pandas, pytz and skyfield.
+This will install pandas, pytz, skyfield and swisseph.
 

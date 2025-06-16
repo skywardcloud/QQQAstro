@@ -29,10 +29,10 @@ from typing import Dict, Union # Union for type hint
 import pandas as pd
 import pytz
 from skyfield.api import load as skyfield_load
-# Add to imports
-from skyfield.api import Topos # For geographic location
+from skyfield.api import Topos  # For geographic location
 from skyfield import almanac   # For sunrise/sunset calculations
 from skyfield.framelib import ecliptic_frame
+import swisseph as swe
 
 # IMPORTANT: If skyfield is not installed, run: pip install skyfield
 

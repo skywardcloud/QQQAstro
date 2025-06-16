@@ -125,31 +125,33 @@ PLANET_FUNCS = {
 }
 
 # ── Lagna (Ascendant) Calculation ─────────────────────────────────
-def calculate_lagna_longitude(dt_utc: datetime, observer_topos: Topos) -> Union[float, type(pd.NA)]:
+def calculate_lagna_longitude(dt_utc: datetime) -> float | pd.NA:
     """
-    Calculates the sidereal longitude of the Ascendant (Lagna) for a given
-    UTC datetime and observer geographic location (Topos object).
-    Uses global SF_TIMESCALER, SF_EARTH, ecliptic_frame, AYANAMSA.
-    Returns pd.NA if input dt_utc is NA.
+    Sidereal Ascendant longitude (Lahiri) for New-York at dt_utc.
+    Uses Swiss-Ephem's house routine (Placidus).
     """
-    if pd.isna(dt_utc):
+    if pd.isna(dt_utc):      # keep NA rows quiet
         return pd.NA
 
-    t = SF_TIMESCALER.from_datetime(dt_utc)
-    observer_at_time = (SF_EARTH + observer_topos).at(t)
+    jd = swe.julday(
+        dt_utc.year,
+        dt_utc.month,
+        dt_utc.day,
+        dt_utc.hour + dt_utc.minute / 60 + dt_utc.second / 3600,
+    )
 
-    # Determine the ICRS coordinates of the point on the eastern horizon
-    # (Altitude 0 degrees, Azimuth 90 degrees)
-    eastern_horizon_point_icrs = observer_at_time.from_altaz(alt_degrees=0, az_degrees=90)
+    # lon < 0 for west longitudes; lat in degrees north
+    asc = swe.houses_ex(
+        jd,
+        NY_LATITUDE,
+        NY_LONGITUDE,  # −74.006 is fine (west is negative)
+        b"P",  # Placidus
+        swe.FLG_SWIEPH,
+    )[0][0]  # Ascendant, tropical deg
 
-    # Convert these ICRS coordinates to ecliptic coordinates of date.
-    # ecliptic_frame is J2000.0 mean ecliptic.
-    # The epoch=t argument ensures the coordinates are for the true ecliptic and equinox of date.
-    _ecl_lat, ecl_lon_tropical_of_date, _dist = eastern_horizon_point_icrs.ecliptic_latlon(epoch=t)
-    
-    tropical_lon_degrees = ecl_lon_tropical_of_date.degrees
-    sidereal_lon_degrees = (tropical_lon_degrees - AYANAMSA) % 360
-    return sidereal_lon_degrees
+    # Convert to sidereal (Lahiri)
+    sid = (asc - AYANAMSA) % 360
+    return sid
 
 # ── zodiac helpers ────────────────────────────────────────────────
 def to_sidereal(lon: float) -> Union[float, type(pd.NA)]:
@@ -500,7 +502,7 @@ def enrich(csv_path: Path, out_path: Path):
     # Transitory Lagna (Ascendant) calculations
     print("ℹ️  Calculating transitory Lagna, sign, nakshatra, and house...")
     df['lagna_long'] = df['utc'].apply(
-        lambda dt_val: calculate_lagna_longitude(dt_val, ny_topos)
+        lambda dt_val: calculate_lagna_longitude(dt_val)
     )
     df['lagna_long'] = pd.to_numeric(df['lagna_long'], errors='coerce')
 

@@ -43,3 +43,7 @@ MANIFEST
 # OS-specific
 .DS_Store
 Thumbs.db
+
+# Custom ignores
+.env
+uploads/

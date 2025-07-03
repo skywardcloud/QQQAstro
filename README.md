@@ -35,3 +35,25 @@ pip install -r requirements.txt
 ```
 This will install pandas, pytz, skyfield and swisseph.
 
+## Running the Web Application
+
+1.  **Install the required packages:**
+
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+2.  **Set your Polygon.io API key as an environment variable:**
+
+    ```bash
+    export POLYGON_API_KEY='your_api_key'
+    ```
+
+3.  **Run the Flask application:**
+
+    ```bash
+    python app.py
+    ```
+
+4.  **Open your web browser and go to `http://127.0.0.1:5000`**
+

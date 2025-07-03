@@ -220,7 +220,7 @@ def calculate_lagna_longitude(dt_utc: datetime) -> float | type(pd.NA):
         jd,
         NY_LATITUDE,
         NY_LONGITUDE,  # −74.006 is fine (west is negative)
-        b"P",  # Placidus
+        b"S",  # Sripati
         swe.FLG_SWIEPH,
     )[0][0]  # Ascendant, tropical deg
 
@@ -228,12 +228,75 @@ def calculate_lagna_longitude(dt_utc: datetime) -> float | type(pd.NA):
     sid = (asc - AYANAMSA) % 360
     return sid
 
+def calculate_house_cusps(dt_utc: datetime) -> list[float] | type(pd.NA):
+    """
+    Calculates the 12 sidereal house cusps for New York at dt_utc.
+    """
+    if pd.isna(dt_utc):
+        return pd.NA
+
+    jd = swe.julday(
+        dt_utc.year,
+        dt_utc.month,
+        dt_utc.day,
+        dt_utc.hour + dt_utc.minute / 60 + dt_utc.second / 3600,
+    )
+
+    cusps_tropical, _ = swe.houses_ex(
+        jd,
+        NY_LATITUDE,
+        NY_LONGITUDE,
+        b"S",  # Sripati
+        swe.FLG_SWIEPH,
+    )
+    
+    # First cusp is cusp 1, and so on. The call returns 13 cusps (1-12 and 1 again)
+    # We need the first 12.
+    # Convert to sidereal
+    cusps_sidereal = [(c - AYANAMSA) % 360 for c in cusps_tropical[:12]]
+    return cusps_sidereal
+
+def get_chalit_house(planet_lon: float, house_cusps: list[float]) -> int | type(pd.NA):
+    """
+    Determines the Chalit house for a planet given its longitude and the house cusps.
+    """
+    if pd.isna(planet_lon) or not isinstance(house_cusps, list):
+        return pd.NA
+
+    # The ascendant (1st house cusp) is the reference point.
+    ascendant_lon = house_cusps[0]
+
+    # Normalize the planet's longitude relative to the ascendant.
+    # This simplifies house calculation by making the 1st house start at 0 degrees.
+    relative_lon = (planet_lon - ascendant_lon + 360) % 360
+
+    # Normalize the house cusps relative to the ascendant as well.
+    relative_cusps = [(c - ascendant_lon + 360) % 360 for c in house_cusps]
+
+    # Find the house.
+    # A planet is in house `i` if its relative longitude is between the
+    # relative cusp of house `i` and house `i+1`.
+    for i in range(12):
+        cusp_start = relative_cusps[i]
+        cusp_end = relative_cusps[(i + 1) % 12]
+
+        if cusp_start < cusp_end:  # Normal case
+            if cusp_start <= relative_lon < cusp_end:
+                return i + 1
+        else:  # Wrap-around case (for the 12th house)
+            if relative_lon >= cusp_start or relative_lon < cusp_end:
+                return i + 1
+
+    # Fallback, should not be reached with correct logic
+    return pd.NA
+
 # ── zodiac helpers ────────────────────────────────────────────────
 def to_sidereal(lon: float) -> Union[float, type(pd.NA)]:
     """Convert a tropical longitude to sidereal using AYANAMSA."""
     return (lon - AYANAMSA) % 360 if pd.notna(lon) else pd.NA
 
-def sign_from_lon(lon: float) -> Union[str, type(pd.NA)]: return SIGNS[int(lon // 30)] if pd.notna(lon) else pd.NA
+def sign_from_lon(lon: float) -> Union[str, type(pd.NA)]:
+    return SIGNS[int(lon // 30)] if pd.notna(lon) else pd.NA
 def nakshatra_from_lon(lon: float) -> Union[str, type(pd.NA)]:
     """Return nakshatra name for a **sidereal** longitude."""
     if pd.notna(lon):
@@ -619,13 +682,25 @@ def enrich(csv_path: Path, out_path: Path):
         lambda r: ang_diff(r['rahu_long'],NATAL_LAGNA_LONG)<=2 or
                   ang_diff(r['ketu_long'],NATAL_LAGNA_LONG)<=2, axis=1)
 
+    # Calculate Chalit house cusps for each row
+    print("ℹ️  Calculating Chalit house cusps for each timestamp...")
+    df['chalit_cusps'] = df['utc'].apply(calculate_house_cusps)
+
     # Planet cusp-cross flags and Swiss Ephemeris sign/nakshatra
     for name,func in PLANET_FUNCS.items():
         col_long = f"{name}_long"
         col_flag = f"{name}_cusp_cross"
-        df[col_long] = df['utc'].apply(func)
+        col_house = f"{name}_house"
+        col_house_change = f"{name}_house_change_5m"
 
+        df[col_long] = df['utc'].apply(func)
         df[col_flag] = df[col_long].apply(near_cusp)
+
+        # Calculate Chalit house for the planet
+        df[col_house] = df.apply(lambda row: get_chalit_house(row[col_long], row['chalit_cusps']), axis=1).astype(pd.Int64Dtype())
+        
+        # Calculate house change flag
+        df[col_house_change] = (df[col_house] != df[col_house].shift(1)).fillna(False).astype(bool)
 
         swe_lons = df['utc'].apply(lambda dt: swe_sidereal_longitude(name, dt))
         df[f"{name}_sign"] = swe_lons.apply(sign_from_lon)
@@ -633,6 +708,9 @@ def enrich(csv_path: Path, out_path: Path):
 
     cusp_cols = [c for c in df.columns if c.endswith('_cusp_cross')]
     df['any_cusp_cross'] = df[cusp_cols].any(axis=1)
+
+    # Drop the temporary cusps column
+    df = df.drop(columns=['chalit_cusps'])
 
     df.to_csv(out_path, index=False)
     print(f"✓ Enriched file saved → {out_path}")

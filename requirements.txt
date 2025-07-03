@@ -2,3 +2,7 @@ pandas
 pytz
 skyfield
 swisseph
+Flask
+requests
+openpyxl
+python-dotenv

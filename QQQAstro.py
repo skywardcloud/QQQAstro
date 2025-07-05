@@ -37,7 +37,13 @@ from skyfield import almanac   # For sunrise/sunset calculations
 from skyfield.framelib import ecliptic_frame
 import swisseph as swe
 
-# IMPORTANT: If skyfield is not installed, run: pip install skyfield
+# New York timezone for proper DST handling
+from zoneinfo import ZoneInfo
+NY_TZ = ZoneInfo("America/New_York")
+
+# Constants for New York coordinates
+NY_LAT = 40.7128
+NY_LON = -74.0060
 
 # ── natal constants ───────────────────────────────────────────────
 AYANAMSA          = 24.0
@@ -58,9 +64,6 @@ NAKSHATRAS = [
 ]
 
 # ── Hora Calculation Constants ────────────────────────────────────
-NY_LATITUDE = 40.7128    # Approximate latitude for New York City
-NY_LONGITUDE = -74.0060  # Approximate longitude for New York City
-
 # Day Lords: datetime.weekday() Monday is 0 and Sunday is 6
 DAY_LORD_MAP = {
     0: "Moon",    # Monday
@@ -200,65 +203,75 @@ PLANET_FUNCS = {
 }
 
 # ── Lagna (Ascendant) Calculation ─────────────────────────────────
-def calculate_lagna_longitude(dt_utc: datetime) -> float | type(pd.NA):
+def get_julian_day(dt_obj):
+    """Converts a datetime object to a Julian Day."""
+    return swe.utc_to_jd(dt_obj.year, dt_obj.month, dt_obj.day, dt_obj.hour, dt_obj.minute, dt_obj.second, 1)[1]
+
+def calculate_lagna_longitude(utc_dt, lat, lon):
     """
-    Sidereal Ascendant longitude (Lahiri) for New-York at dt_utc.
-    Uses Swiss-Ephem's house routine (Placidus).
+    Calculates the Sidereal longitude of the Lagna (Ascendant).
+    Swiss Ephemeris expects a UTC timestamp.
     """
-    if pd.isna(dt_utc):      # keep NA rows quiet
-        return pd.NA
+    # Ensure swe is initialized
+    if not hasattr(swe, 'version'):
+        swe.set_ephe_path(os.environ.get('SWEP_PATH'))
 
-    jd = swe.julday(
-        dt_utc.year,
-        dt_utc.month,
-        dt_utc.day,
-        dt_utc.hour + dt_utc.minute / 60 + dt_utc.second / 3600,
-    )
+    # Set the sidereal mode to Lahiri
+    swe.set_sid_mode(swe.SIDM_LAHIRI)
 
-    # lon < 0 for west longitudes; lat in degrees north
-    asc = swe.houses_ex(
-        jd,
-        NY_LATITUDE,
-        NY_LONGITUDE,  # −74.006 is fine (west is negative)
-        b"S",  # Sripati
-        swe.FLG_SWIEPH,
-    )[0][0]  # Ascendant, tropical deg
+    # The swe.houses function requires a Julian Day in UTC.
+    jd_utc = get_julian_day(utc_dt)
 
-    # Convert to sidereal (Lahiri)
-    sid = (asc - AYANAMSA) % 360
-    return sid
+    # Calculate house cusps and ascendant
+    # The 'P' is for Sripati houses, which is a Chalit system.
+    # For Placidus, use 'P'. For Koch, use 'K'. For Sripati, use 'Y'.
+    # Let's try with Placidus 'P' as Sripati seems to be causing issues.
+    # After further research, swe.houses_ex is better for Chalit.
+    # However, the primary issue is the ascendant, which is the same across house systems.
+    # The `houses` call returns cusps and ascmc (Asc, MC, etc.)
+    cusps, ascmc = swe.houses(jd_utc, lat, lon, b'P')
 
-def calculate_house_cusps(dt_utc: datetime) -> list[float] | type(pd.NA):
-    """
-    Calculates the 12 sidereal house cusps for New York at dt_utc.
-    """
-    if pd.isna(dt_utc):
-        return pd.NA
+    # The ascendant is the first value in the ascmc array.
+    lagna_tropical = ascmc[0]
 
-    jd = swe.julday(
-        dt_utc.year,
-        dt_utc.month,
-        dt_utc.day,
-        dt_utc.hour + dt_utc.minute / 60 + dt_utc.second / 3600,
-    )
+    # Get the ayanamsa value for the given date
+    ayanamsa = swe.get_ayanamsa_ut(jd_utc)
 
-    cusps_tropical, _ = swe.houses_ex(
-        jd,
-        NY_LATITUDE,
-        NY_LONGITUDE,
-        b"S",  # Sripati
-        swe.FLG_SWIEPH,
-    )
+    # Calculate sidereal longitude
+    lagna_sidereal = (lagna_tropical - ayanamsa) % 360
     
-    # First cusp is cusp 1, and so on. The call returns 13 cusps (1-12 and 1 again)
-    # We need the first 12.
-    # Convert to sidereal
-    cusps_sidereal = [(c - AYANAMSA) % 360 for c in cusps_tropical[:12]]
-    return cusps_sidereal
+    return lagna_sidereal
 
-def get_chalit_house(planet_lon: float, house_cusps: list[float]) -> int | type(pd.NA):
+def calculate_house_cusps(utc_dt, lat, lon):
     """
-    Determines the Chalit house for a planet given its longitude and the house cusps.
+    Calculates the sidereal longitude of all 12 house cusps using Sripati system.
+    This now correctly uses the UTC datetime directly.
+    """
+    # Convert UTC datetime to Julian Day UT
+    jd_ut, _ = swe.utc_to_jd(
+        utc_dt.year,
+        utc_dt.month,
+        utc_dt.day,
+        utc_dt.hour,
+        utc_dt.minute,
+        utc_dt.second + utc_dt.microsecond / 1_000_000,
+        1  # Gregorian calendar
+    )
+
+    # Get Ayanamsa
+    ayanamsa = swe.get_ayanamsa_ut(jd_ut)
+
+    # Calculate house cusps using Sripati system
+    cusps, ascmc = swe.houses_ex(jd_ut, lat, lon, hsys=b'S')
+
+    # Adjust cusps by ayanamsa to get sidereal values
+    sidereal_cusps = [(cusp - ayanamsa) % 360 for cusp in cusps]
+    
+    return sidereal_cusps
+
+def get_house_for_planet(planet_lon, house_cusps):
+    """
+    Determines the house number for a planet given its longitude and the house cusps.
     """
     if pd.isna(planet_lon) or not isinstance(house_cusps, list):
         return pd.NA
@@ -595,7 +608,7 @@ def enrich(csv_path: Path, out_path: Path):
     df['utc'] = df['timestamp'].dt.tz_convert('UTC')
 
     # Hora Calculation Setup
-    ny_topos = Topos(latitude_degrees=NY_LATITUDE, longitude_degrees=NY_LONGITUDE)
+    ny_topos = Topos(latitude_degrees=NY_LAT, longitude_degrees=NY_LON)
     sunrise_cache_utc: Dict[datetime.date, Union[datetime, None]] = {} 
     sunset_cache_utc: Dict[datetime.date, Union[datetime, None]] = {} # Cache for sunset times
 
@@ -636,7 +649,7 @@ def enrich(csv_path: Path, out_path: Path):
 
     # Transitory Lagna (Ascendant) calculations
     print("ℹ️  Calculating transitory Lagna, sign, nakshatra, and house...")
-    df['lagna_long'] = df['utc'].apply(calculate_lagna_longitude)
+    df['lagna_long'] = df['utc'].apply(lambda utc_dt: calculate_lagna_longitude(utc_dt, NY_LAT, NY_LON))
     df['lagna_long'] = pd.to_numeric(df['lagna_long'], errors='coerce')
 
     # Longitude already sidereal – just lookup the sign directly
@@ -684,7 +697,7 @@ def enrich(csv_path: Path, out_path: Path):
 
     # Calculate Chalit house cusps for each row
     print("ℹ️  Calculating Chalit house cusps for each timestamp...")
-    df['chalit_cusps'] = df['utc'].apply(calculate_house_cusps)
+    df['chalit_cusps'] = df['utc'].apply(lambda utc_dt: calculate_house_cusps(utc_dt, NY_LAT, NY_LON))
 
     # Planet cusp-cross flags and Swiss Ephemeris sign/nakshatra
     for name,func in PLANET_FUNCS.items():
@@ -697,7 +710,7 @@ def enrich(csv_path: Path, out_path: Path):
         df[col_flag] = df[col_long].apply(near_cusp)
 
         # Calculate Chalit house for the planet
-        df[col_house] = df.apply(lambda row: get_chalit_house(row[col_long], row['chalit_cusps']), axis=1).astype(pd.Int64Dtype())
+        df[col_house] = df.apply(lambda row: get_house_for_planet(row[col_long], row['chalit_cusps']), axis=1).astype(pd.Int64Dtype())
         
         # Calculate house change flag
         df[col_house_change] = (df[col_house] != df[col_house].shift(1)).fillna(False).astype(bool)

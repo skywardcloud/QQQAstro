@@ -6,8 +6,20 @@ import os
 from QQQAstro import enrich  # Assuming enrich function is in QQQAstro.py
 from datetime import datetime, timedelta
 
-load_dotenv()
+# Load environment variables from .env file at the start
+load_dotenv(override=True)
+
+print(f"[DEBUG] CWD: {os.getcwd()}")
+print(f"[DEBUG] Files in CWD: {os.listdir(os.getcwd())}")
+print(f"[DEBUG] API Key at startup: {os.environ.get('POLYGON_API_KEY')}")
+
 app = Flask(__name__)
+
+def get_polygon_api_key():
+    key = os.environ.get("POLYGON_API_KEY")
+    if not key:
+        raise RuntimeError("POLYGON_API_KEY environment variable not set. Please add it to your .env file.")
+    return key
 
 # Configure the upload folder and allowed extensions
 UPLOAD_FOLDER = 'uploads'
@@ -30,20 +42,21 @@ def fetch_data():
     ticker = request.form.get('ticker')
     from_date_str = request.form.get('from_date')
     to_date_str = request.form.get('to_date')
+    interval = request.form.get('interval', '5')  # Default to 5 minutes
 
     from_date = datetime.strptime(from_date_str, '%Y-%m-%d').date()
     to_date = datetime.strptime(to_date_str, '%Y-%m-%d').date()
 
     all_results = []
     current_date = from_date
-    api_key = os.environ.get("POLYGON_API_KEY")
-
-    if not api_key:
-        return jsonify({'error': 'POLYGON_API_KEY environment variable not set.'}), 500
+    try:
+        api_key = get_polygon_api_key()
+    except RuntimeError as e:
+        return jsonify({'error': str(e)}), 500
 
     while current_date <= to_date:
         date_str = current_date.strftime('%Y-%m-%d')
-        url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/5/minute/{date_str}/{date_str}?apiKey={api_key}"
+        url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/{interval}/minute/{date_str}/{date_str}?apiKey={api_key}"
         response = requests.get(url)
         if response.status_code == 200:
             data = response.json()
@@ -51,8 +64,6 @@ def fetch_data():
                 all_results.extend(data['results'])
         else:
             print(f"Error fetching data for {date_str}: {response.status_code} - {response.text}")
-            # Optionally, you can return an error message to the user
-            # return jsonify({'error': f'Failed to fetch data from Polygon.io for {date_str}. Status: {response.status_code}'}), 500
         current_date += timedelta(days=1)
 
     if all_results:
@@ -115,4 +126,4 @@ def export_to_excel():
 
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=False)

@@ -5,6 +5,12 @@ import requests
 import os
 from QQQAstro import enrich  # Assuming enrich function is in QQQAstro.py
 from datetime import datetime, timedelta
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+import numpy as np
 
 # Load environment variables from .env file at the start
 load_dotenv(override=True)
@@ -123,6 +129,65 @@ def export_to_excel():
         except Exception as e:
             return str(e)
     return 'Enriched data not found', 404
+
+@app.route('/predictive_analysis', methods=['POST'])
+def predictive_analysis():
+    enriched_data_path = os.path.join(app.config['UPLOAD_FOLDER'], 'enriched_data.csv')
+    if not os.path.exists(enriched_data_path):
+        return jsonify({'error': 'Enriched data not found. Please enrich data first.'}), 404
+
+    try:
+        df = pd.read_csv(enriched_data_path)
+
+        # 1. Define the Target Variable: "Sudden Change"
+        # Use lowercase 'h' and 'l' which come from the Polygon API
+        df['price_swing_pct'] = ((df['h'] - df['l']) / df['l']) * 100
+
+        # 2. Prepare the Features
+        categorical_features = ['hora', 'moon_sign', 'nakshatra', 'lagna_sign', 'lagna_nakshatra']
+        boolean_features = [col for col in df.columns if '_cusp_cross' in col or '_house_change' in col or 'lunar_return' in col or 'node_hits_lagna' in col]
+        
+        categorical_features = [f for f in categorical_features if f in df.columns]
+        boolean_features = [f for f in boolean_features if f in df.columns]
+
+        features = categorical_features + boolean_features
+        
+        df.dropna(subset=features + ['price_swing_pct'], inplace=True)
+
+        if df.empty:
+            return jsonify({'error': 'Not enough clean data to run analysis.'}), 400
+
+        X = df[features]
+        y = df['price_swing_pct']
+
+        # Create a preprocessor to handle categorical features
+        preprocessor = ColumnTransformer(
+            transformers=[
+                ('cat', OneHotEncoder(handle_unknown='ignore'), categorical_features)
+            ],
+            remainder='passthrough'
+        )
+
+        # 3. Create and Train the Model
+        model = Pipeline(steps=[('preprocessor', preprocessor),
+                                ('regressor', RandomForestRegressor(n_estimators=100, random_state=42))])
+
+        model.fit(X, y)
+
+        # 4. Extract Feature Importances
+        encoded_feature_names = model.named_steps['preprocessor'].get_feature_names_out()
+        
+        importances = model.named_steps['regressor'].feature_importances_
+        feature_importance_df = pd.DataFrame({'feature': encoded_feature_names, 'importance': importances})
+        feature_importance_df = feature_importance_df.sort_values(by='importance', ascending=False).head(15)
+
+        return jsonify({
+            'message': 'Predictive analysis complete!',
+            'feature_importances': feature_importance_df.to_html(index=False)
+        })
+
+    except Exception as e:
+        return jsonify({'error': f'An error occurred during analysis: {str(e)}'}), 500
 
 
 if __name__ == '__main__':

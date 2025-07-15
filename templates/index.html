@@ -47,14 +47,16 @@
         </div>
         
         <!-- Step 2: Enrich Data -->
-        <button id="enrichButton" class="hidden">Enrich Data</button>
+        <button id="enrichButton" class="hidden" onclick="enrichData()">Enrich Data</button>
         <div id="enrichedData" class="hidden">
             <h3>Enriched Data</h3>
             <div id="enrichedDataTable"></div>
             <a href="/export_to_excel" id="exportButton" class="hidden" download>
                 <button>Export to Excel</button>
             </a>
+            <button id="predictButton" class="hidden" onclick="runPrediction()">Run Predictive Analysis</button>
         </div>
+        <div id="predictionResults"></div>
     </div>
 
     <script>
@@ -99,7 +101,7 @@
             });
         });
 
-        document.getElementById('enrichButton').addEventListener('click', function() {
+        function enrichData() {
             fetch('/enrich_data', {
                 method: 'POST'
             })
@@ -111,9 +113,29 @@
                     document.getElementById('enrichedData').classList.remove('hidden');
                     document.getElementById('enrichedDataTable').innerHTML = data.data;
                     document.getElementById('exportButton').classList.remove('hidden');
+                    document.getElementById('predictButton').classList.remove('hidden');
                 }
             });
-        });
+        }
+
+        function runPrediction() {
+            document.getElementById('predictButton').disabled = true;
+            document.getElementById('predictButton').innerText = 'Running...';
+
+            fetch('/predictive_analysis', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        alert('Error: ' + data.error);
+                    } else {
+                        document.getElementById('predictionResults').innerHTML = `<h3>${data.message}</h3><h4>Top 15 Most Predictive Features:</h4>${data.feature_importances}`;
+                    }
+                })
+                .finally(() => {
+                    document.getElementById('predictButton').disabled = false;
+                    document.getElementById('predictButton').innerText = 'Run Predictive Analysis';
+                });
+        }
     </script>
 </body>
 </html>

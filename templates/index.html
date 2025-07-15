@@ -2,139 +2,91 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>QQQ Astro Data Enrichment</title>
+    <title>QQQ Astro Analysis</title>
     <style>
-        body { font-family: sans-serif; }
-        .container { max-width: 800px; margin: 0 auto; padding: 20px; }
-        .hidden { display: none; }
-        #enrichButton, #filterButton { margin-top: 20px; }
+        body { font-family: sans-serif; margin: 2em; }
+        .controls, .results { margin-top: 1em; padding: 1em; border: 1px solid #ccc; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>QQQ Astro Data Enrichment</h1>
-        
-        <!-- Step 1: Fetch Data -->
-        <h2>Step 1: Fetch Data from Polygon.io</h2>
-        <form id="fetchForm">
-            <label for="ticker">Ticker:</label>
-            <input type="text" id="ticker" name="ticker" value="QQQ" required>
-            <label for="from_date">From Date:</label>
-            <input type="date" id="from_date" name="from_date" required>
-            <label for="to_date">To Date:</label>
-            <input type="date" id="to_date" name="to_date" required>
-            <label for="interval">Interval (minutes):</label>
-            <select id="interval" name="interval">
+    <h1>QQQ Astro Analysis</h1>
+    <div class="controls">
+        <h2>Fetch & Enrich Data</h2>
+        <form id="fetch-form">
+            Ticker: <input type="text" name="ticker" value="QQQ" required>
+            From: <input type="date" name="from_date" required>
+            To: <input type="date" name="to_date" required>
+            Interval (min):
+            <select name="interval">
                 <option value="5">5</option>
                 <option value="15">15</option>
             </select>
-            <button type="submit">Fetch</button>
+            <button type="submit">Fetch Data</button>
         </form>
-        
-        <div id="filterSection" class="hidden">
-            <h3>Filter Fetched Data</h3>
-            <form id="filterForm">
-                <label for="diff_percentage">Difference between H & L >= (%):</label>
-                <input type="number" id="diff_percentage" name="diff_percentage" value="1" step="0.1" required>
-                <button type="submit">Filter</button>
-            </form>
-        </div>
+        <button onclick="enrichData()">Enrich Fetched Data</button>
+    </div>
 
-        <div id="fetchedData" class="hidden">
-            <h3>Fetched Data</h3>
-            <div id="fetchedDataTable"></div>
-        </div>
-        
-        <!-- Step 2: Enrich Data -->
-        <button id="enrichButton" class="hidden" onclick="enrichData()">Enrich Data</button>
-        <div id="enrichedData" class="hidden">
-            <h3>Enriched Data</h3>
-            <div id="enrichedDataTable"></div>
-            <a href="/export_to_excel" id="exportButton" class="hidden" download>
-                <button>Export to Excel</button>
-            </a>
-            <button id="predictButton" class="hidden" onclick="runPrediction()">Run Predictive Analysis</button>
-        </div>
-        <div id="predictionResults"></div>
+    <div class="controls">
+        <h2>Analysis & Export</h2>
+        <button id="predictButton" onclick="runPrediction()">Run Predictive Analysis on Database</button>
+        <button onclick="exportToExcel()">Export Database to Excel</button>
+    </div>
+
+    <h2>Results</h2>
+    <div id="results" class="results">
+        <p>Results will be displayed here.</p>
     </div>
 
     <script>
-        document.getElementById('fetchForm').addEventListener('submit', function(event) {
-            event.preventDefault();
-            
+        document.getElementById('fetch-form').addEventListener('submit', function(e) {
+            e.preventDefault();
             const formData = new FormData(this);
-            
+            document.getElementById('results').innerHTML = '<p>Fetching data...</p>';
             fetch('/fetch_data', {
                 method: 'POST',
-                body: formData
+                body: new URLSearchParams(formData)
             })
             .then(response => response.json())
             .then(data => {
                 if (data.error) {
-                    alert(data.error);
+                    document.getElementById('results').innerHTML = `<p style="color:red;">Error: ${data.error}</p>`;
                 } else {
-                    document.getElementById('fetchedData').classList.remove('hidden');
-                    document.getElementById('fetchedDataTable').innerHTML = data.data;
-                    document.getElementById('enrichButton').classList.remove('hidden');
-                    document.getElementById('filterSection').classList.remove('hidden');
-                }
-            });
-        });
-
-        document.getElementById('filterForm').addEventListener('submit', function(event) {
-            event.preventDefault();
-            
-            const formData = new FormData(this);
-            
-            fetch('/filter_data', {
-                method: 'POST',
-                body: formData
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.error) {
-                    alert(data.error);
-                } else {
-                    document.getElementById('fetchedDataTable').innerHTML = data.data;
+                    document.getElementById('results').innerHTML = `<h3>${data.message}</h3>${data.data}`;
                 }
             });
         });
 
         function enrichData() {
-            fetch('/enrich_data', {
-                method: 'POST'
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.error) {
-                    alert(data.error);
-                } else {
-                    document.getElementById('enrichedData').classList.remove('hidden');
-                    document.getElementById('enrichedDataTable').innerHTML = data.data;
-                    document.getElementById('exportButton').classList.remove('hidden');
-                    document.getElementById('predictButton').classList.remove('hidden');
-                }
-            });
+            document.getElementById('results').innerHTML = '<p>Enriching data and saving to database...</p>';
+            fetch('/enrich_data', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        document.getElementById('results').innerHTML = `<p style="color:red;">Error: ${data.error}</p>`;
+                    } else {
+                        document.getElementById('results').innerHTML = `<h3>${data.message}</h3>${data.data}`;
+                    }
+                });
         }
 
         function runPrediction() {
-            document.getElementById('predictButton').disabled = true;
-            document.getElementById('predictButton').innerText = 'Running...';
-
+            document.getElementById('results').innerHTML = '<p>Running predictive analysis on the entire database...</p>';
             fetch('/predictive_analysis', { method: 'POST' })
                 .then(response => response.json())
                 .then(data => {
                     if (data.error) {
-                        alert('Error: ' + data.error);
+                        document.getElementById('results').innerHTML = `<p style="color:red;">Error: ${data.error}</p>`;
                     } else {
-                        document.getElementById('predictionResults').innerHTML = `<h3>${data.message}</h3><h4>Top 15 Most Predictive Features:</h4>${data.feature_importances}`;
+                        document.getElementById('results').innerHTML = `<h3>${data.message}</h3><h4>Top 20 Most Predictive Features:</h4>${data.feature_importances}`;
                     }
-                })
-                .finally(() => {
-                    document.getElementById('predictButton').disabled = false;
-                    document.getElementById('predictButton').innerText = 'Run Predictive Analysis';
                 });
+        }
+
+        function exportToExcel() {
+            window.location.href = '/export_to_excel';
         }
     </script>
 </body>
